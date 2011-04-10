@@ -1,3 +1,9 @@
+yate (3.3.1.svn4275) natty; urgency=low
+
+  * debian/changelog: Switch to Ubuntu Natty series
+
+ -- Will Daniels <mail@willdaniels.co.uk>  Sun, 10 Apr 2011 20:42:13 +0100
+
 yate (3.3.1.svn4275) UNRELEASED; urgency=low
 
   * Updated to SVN revision 4275: + Use join muc wizard to add new chat
