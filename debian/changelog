@@ -1,3 +1,9 @@
+yate (3.3.3.vir2011120704) oneiric; urgency=low
+
+  * debian/changelog: Switch to Ubuntu Oneiric series
+
+ -- Will Daniels <mail@willdaniels.co.uk>  Wed, 14 Dec 2011 02:37:30 +0000
+
 yate (3.3.3.vir2011120704) UNRELEASED; urgency=low
 
   * Fixed UU IE duplication
