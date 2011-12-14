@@ -1,1076 +1,230 @@
-yate (3.3.1.svn4275+wgd1) natty; urgency=low
-
-  * debian/changelog: Switch to Ubuntu Natty series
-  * debian/control: Resolve dependency conflict for libpt-dev
-
- -- Will Daniels <mail@willdaniels.co.uk>  Mon, 11 Apr 2011 03:36:42 +0100
-
-yate (3.3.1.svn4275) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4275: + Use join muc wizard to add new chat
-    room contacts. Allow changing chat room account, room and server
-    when editing one.  + Properly add lines of text bodies to generic
-    SIP messages.  + Allow generic processing of SIP INFO messages that
-    are not used for DTMFs.  + Decode MIME type message/sipfrag as lines
-    of text.  + Added methods to get the Module ID of a MessageRelay and
-    to check if the relay with a specific ID is installed.  + Priority
-    of all handlers in callfork is now configurable.  + Added
-    possibility to configure messages to be forked by the callfork
-    module.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Fri, 08 Apr 2011 02:19:21 +0400
-
-yate (3.3.1.svn4271) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4271: + Honor an earlymedia=false parameter
-    even when using RTP forwarding.  + Client ring in and out flags now
-    default to 'on'.  + Added fax tone detection to MGCP and ability to
-    override the request string.  + Update the status of the peer of a
-    ringing or answered channel in CDR.  + Copy any RTP information to
-    call.update when call is accepted, it may be needed in processing.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Thu, 07 Apr 2011 02:19:20 +0400
-
-yate (3.3.1.svn4266) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4266: + Added packaging: new client UI files
-    + Fixed bug: add the separator when building the list of compression
-    methods from received stanza.  + Added support for forwarding media
-    change requests (reINVITE) from ysigchan to mgcpca or any other
-    bearer.  + Set server parameter for GTalk provider.  + Advertise
-    external components in the list of server items when requested.
-    Match server target for stanzas received on component streams.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Wed, 06 Apr 2011 02:19:22 +0400
-
-yate (3.3.1.svn4262) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4262: + Advertise 'pmuc-v1' MUC capability
-    in entity capability child of the presence stanza.  + Added support
-    for google groupchat.  + Fixed bug: enable 'next' button in join muc
-    wizard when the user enters text in muc server.  + Filled muc server
-    list in join muc wizard with known conference servers.  + Added
-    capability to create a new private chat room and invite contacts to
-    it.  + Changed application icons.  + Fixed data conversion warning.
-    + Bumped version to 3.3.0 release.  + Bumped version to 3.3.1 alpha1
-    development.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Sat, 02 Apr 2011 02:19:21 +0400
-
-yate (3.2.1.svn4252) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4252: + Should fix many crashes like:
-    assert.cxx(108) PWLib Assertion fail: Invalid array index, file
-    .../ptlib/contain.inl  + Protected H.323 endpoint against concurrent
-    creation of connections, the library is not thread safe when copying
-    capabilities.  + Complain louder if an incorrect SLTM is received on
-    a link.  + Added "show" control that print routes to linksets too.
-    + Print SS7 routes to the output, not as a debug.  + Changed some
-    monitoring and SNMP debug messages to DDEBUG (compile-time).  + Made
-    the SNMP debugging messages more useful.  + The media list is now
-    keeping the telephone event payload id along with its name and an
-    optional second telephone event payload name to send.  + Remember
-    telephone event payload id and name for received contents and
-    reflect them when responding. Update telephone event for sent
-    contents. Set event payload id when starting rtp.  + Reset errno
-    when starting to list directory content to make sure we don't
-    inherit a previous failure.  + Fixed compile errors on Mac OS X
-    10.6. Moved on from deprecated APIs. Added check during configure
-    for APIs used.  + Handle logical AND and OR operators when
-    evaluating an expression.  + Fixed account directory clear: don't
-    add path separator when listing the directory. Fixed account
-    directory setup: properly check the error when listing the parent
-    directory.  + Prevent the original Bourne shell from showing command
-    not found errors.  + Fixed parser for links status and interfaces
-    status when there are none configured.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Fri, 01 Apr 2011 02:19:20 +0400
-
-yate (3.2.1.svn4241) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4241: + Fixed bug: set all data when
-    initializing media payload.  + Handle 'bitrate' attribute in
-    received payload.  + Fixed media checking for incoming contents.
-    Fixed ilbc codec negotiation. Added speex to codecs list.  + Thanks
-    to Michele Badaracchi for finding out the source of the problem.  +
-    Should fix many crashes like: assert.cxx(108) PWLib Assertion fail:
-    Invalid array index, file .../ptlib/contain.inl  + Protected H.323
-    endpoint against concurrent creation of connections, the library is
-    not thread safe when copying capabilities.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Thu, 31 Mar 2011 02:19:15 +0400
-
-yate (3.2.1.svn4237) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4237: + Lock the sessions when sending data
-    or events, prevent race conditions.  + Made RTP and UDPTL sessions
-    derive from Mutex.  + Added fax divert capability on RFC2833 CNG to
-    the RTP channel too.  + Changed variable and method names to be more
-    suggestive.  + Fixed adding caller and caller numbers when diverting
-    to fax from tonedetect.  + Copy the connect reason from call.execute
-    message.  + Added method used to set a media list from another one.
-    + Fixed bug: avoid clearing rtp media parameters in copy
-    constructor.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Wed, 30 Mar 2011 02:19:15 +0400
-
-yate (3.2.1.svn4232) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4232: + Fixed enabling of internal
-    microphone on Mac OS X.  + Added autojoin option to chat room
-    contacts.  + Added "netindicator" setting for linksets so it's no
-    longer required to restrict types using netind2pctype.  + Fixed
-    checking if a engine.status module is indeed intended for that
-    module. Fixed bug: don't print for a second time the status message
-    for IAX module.  + Display the target when querying a domain for
-    conference server(s) and a conference server for available rooms.  +
-    Add the "workpath" to the Engine parameters so the current working
-    directory can be found at runtime.  + Fixed ui spacer.  + Remember
-    disco info/items requests if no 'id' parameter is specified. Notify
-    when responded.  + Handle conference server and rooms query errors.
-    Reset join wizard state if error is received.  + Fixed ddebug
-    building of call counters module.  + Removed unused variable.  +
-    Added methods to extract a fragment of a String up to a separator.
-    + Fixed link status parsing for SNMP, added support for link uptime.
-    + Added support for reporting uptime for SS7 links and Q.921
-    interfaces.  + Added proper MIB revision.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Tue, 29 Mar 2011 02:19:15 +0400
-
-yate (3.2.1.svn4217) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4217: + Set dtmf method for incoming calls
-    from google voice.  + Set yate node in presence entity capability
-    child.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Sat, 26 Mar 2011 02:19:20 +0300
-
-yate (3.2.1.svn4215) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4215: + Allow overriding dtmf method on
-    incoming jingle channels.  + Emit new message "chan.replaced" when a
-    fork is answered so other modules can synchronize their state.  +
-    Handle "chan.replaced" message, adjust ID for PBX peer on-hold and
-    pending transfer list.  + The custom contact list can now handle
-    chat room contacts.  + Chat rooms can now be added to contacts list.
-    Save them locally and to server as private data. Retrieve chat rooms
-    private data when connected.  + Optionally set entity node when
-    building a GTalk entity caps element.  + Allow
-    Engine::loadPluginDir(), Engine::extraPath() and yate -x to load a
-    single module file, not an entire directory.  + Adjusted debugging
-    in MGCP, prevent log spamming.  + Display only the mapping of first
-    circuit in a MGCP span.  + Added new namespace and use it to detect
-    jingle version and audio capability from advertised features.  +
-    Report the various paths in engine status detail.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Fri, 25 Mar 2011 02:19:21 +0300
-
-yate (3.2.1.svn4204) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4204: + Avoid adding twice the module
-    parameter when dispatching jabber.account messages.  + Fixed bug:
-    parse all contact's instance list when searching for audio caps.  +
-    Added API and command to reload configuration of a single plugin.  +
-    Moved DebugEnabler and name from Module to Plugin, made name
-    mandatory.  + Added TAB completion for status command to the regfile
-    module.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Thu, 24 Mar 2011 02:19:18 +0300
-
-yate (3.2.1.svn4200) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4200: + Moved jabberclient from yate-qt4
-    into libyate  + This helps catching netind2pctype MTP3
-    misconfiguration.  + Complain when mapping NI -> Type -> NI of
-    received SS7 SLTM is not identity.  + Implemented per stream
-    requests queue. Notify when confirmed. Use them for roster changes.
-    + Handle user.data messages and set/get private data from server.  +
-    Added national use NAI for network specific and routing numbers
-    (ANSI style).
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Wed, 23 Mar 2011 02:19:17 +0300
-
-yate (3.2.1.svn4196) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4196: + Moved the post-disconnect hooking
-    code from ysigchan to the Channel class.  + Also don't add sip: in
-    front of sip:number URIs (we turned to sip:sip:number).  + Leave the
-    tel: URIs untouched when sent on an outbound SIP call.  + Allow
-    altering the SIP code in the chan.disconnected message.  + Sanitize
-    the custom SIP cause codes, must be >= 300.  + Added make target
-    install-noconf that doesn't install config files or API docs.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Mon, 21 Mar 2011 02:19:20 +0300
-
-yate (3.2.1.svn4193) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4193: + Added support for delivering Caller
-    ID over analog FXS MGCP gateways.  + Added option to try to provide
-    ringback from analog card or gateway if early media is not available
-    from the called party.  + Emit call.ringing automatically from
-    outbound calls on FXS interfaces.  + Modified notification in ISUP
-    to only consider its own Layer 3 and remote route status, not
-    individual linksets attached to the router.  + Added to
-    NamedList::copySubParams() the option of not skipping over the
-    matched prefix in parameter names.  + Added method to check easily
-    if a SIP transaction can send a response message.  + Added
-    capability of sending arbitrary SIP headers on call disconnect.  +
-    Moved the post-disconnect hooking code from ysigchan to the Channel
-    class.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Fri, 18 Mar 2011 02:19:23 +0300
-
-yate (3.2.1.svn4187) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4187: + Fixed parsing of trunks status
-    messages, made it tolerable to changes in engine.status.  + Added
-    ISUP setting (default on ANSI) to set CGB messages duplicated.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Thu, 17 Mar 2011 02:19:19 +0300
-
-yate (3.2.1.svn4185) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4185: + Indicate in circuit status if it has
-    a status change pending (block/unblock or reset).  + Made message
-    unack counter modifiable at runtime.  + Reduced the M2PA minimum
-    unack timer to 50ms.  + When forcing a circuit (group) block or
-    unblock remove any opposing operation pending.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Wed, 16 Mar 2011 02:19:19 +0300
-
-yate (3.2.1.svn4182) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4182: + Prevents a race condition causing a
-    crash if a RFC2833 DTMF is sent while media stream is destroyed.  +
-    Reference on find() and keep the RTP wrapper referenced while we use
-    it.  + Avoid deadlock: don't try to lock the client proxy mutex from
-    client channel handlers.  + Added audio set notification to
-    ClientChannel. Handle it in default logic.  + Allow adding chat
-    contacts on connected accounts only.  + Accept ISUP CPR and ANM in
-    state Setup if they have Backward Call Indicators.  + Handle text
-    changed in username field in chat contact add window: split
-    'user@domain' and set user and domain in the appropriate field(s).
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Tue, 15 Mar 2011 02:19:14 +0300
-
-yate (3.2.1.svn4176) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4176: + Added new module to yate package  +
-    Fixed the name of the cause_q931 variable in the sample file for
-    RADIUS accounting.  + Advanced mode view now defaults to off.  +
-    Correctly report RUDP socket errors - and only once.  + Show a
-    notification message when failed to set media on active channel.  +
-    Cry loud when a Cisco MGCP gateway reports a DSP failure.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Sat, 12 Mar 2011 02:19:29 +0300
-
-yate (3.2.1.svn4171) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4171: + Added and chaged debug to see when a
-    channel is trying to make a call on a trunk and fails.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Fri, 11 Mar 2011 02:19:21 +0300
-
-yate (3.2.1.svn4170) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4170: + Modified the way M2PA UserData
-    messages are acknowledged.  + Bumped version to 3.2.0 release.  +
-    Bumped version to 3.2.1 alpha1 development.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Thu, 10 Mar 2011 02:19:27 +0300
-
-yate (3.1.1.svn4167) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4167: + Bug fix: exit loop after succesfully
-    evaluated a table evaluator limit.  + Show info about C Runtime in
-    installer.  + Added the CNAM and LNP query over SIP module to
-    Windows build.  + Reduces the number of ACK messages in case of
-    unidirectional high traffic.  + Modified the way M2PA UserData
-    messages are acknowledged.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Wed, 09 Mar 2011 02:19:15 +0300
-
-yate (3.1.1.svn4164) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4164: + Check if the remote Point Code is
-    set in ISUP before using it.  + Set the value of rport parameter
-    (RFC 3581) in the topmost Via header only if the parameter is
-    already set by the client or proxy and has no value.  + These flags
-    can be configured per engine and can be overridden in some messages
-    by setting an "xsip_flags" parameter.  + Added flags that control
-    how SIP message components are automatically completed.  + Add a
-    "sip/" in front of a callto resource that starts with a SIP URI.  +
-    Added setting for the extra SIP flags in requests.  + Report textual
-    status of call controllers (trunks).  + Added support for Extended
-    Changeover messages (XCO/XCA) used with 24-bit sequence SS7 links.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Tue, 08 Mar 2011 02:19:16 +0300
-
-yate (3.1.1.svn4159) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4159: + Replace engine parameters in the
-    path of modules loaded from [preload] or [postload] sections.  + Do
-    not emit chan.disconnected for the master of a fork already
-    answered.  + Prevents a race condition from clearing the timer too
-    early.  + Start the M2PA ACK timer before sending the SIGTRAN
-    packet.  + Fixed the way ISUP calls are released when media cannot
-    be started or checked.  + Added support for changeover and
-    changeback messages on networks like ANSI where the SLC is not
-    stored in the routing label's SLS.  + Send repeatedly Link Status
-    messages during M2PA proving, some implementations require them.  +
-    Code was crashing if an ISUP was started with an invalid
-    configuration.  + Check if the remote Point Code is set in ISUP
-    before using it.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Sat, 05 Mar 2011 02:19:20 +0300
-
-yate (3.1.1.svn4153) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4153: + Use async connect if available. The
-    stream connect timeout value is no longer global: it's used for each
-    connect attempt (configured address, srv record, domain). Remember
-    connect status and re-connect starting from old status. Added srv
-    query timeout configurable option.  + Added subdirectory for SIP
-    related feature modules.  + Added module to perform CNAM and LNP
-    queries via SIP INVITE / 3xx.  + This allows using ${modulepath} and
-    ${modsuffix} so an absolute path is no longer required.  + Replace
-    engine parameters in the path of modules loaded from [preload] or
-    [postload] sections.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Fri, 04 Mar 2011 02:19:23 +0300
-
-yate (3.1.1.svn4149) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4149: + Do not Idle a Failed or Missing MGCP
-    circuit whose connection was deleted by the gateway.  + Added
-    failsafes to prevent reusing an ISUP circuit if a call still owns
-    it.  + Added method used to check if a non blocking operation is in
-    progress. Added method used to update the socket error when a non
-    blocking operation completed.  + Added capability to set response
-    code and additional parameters when redirecting a SIP call as UAS.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Thu, 03 Mar 2011 02:19:19 +0300
-
-yate (3.1.1.svn4145) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4145: + Added status detail to the pbxassist
-    module.  + Being set by the peer we don't want them in our
-    chan.hangup message.  + Clear disconnect parameters after retrieving
-    them once.  + Parameters are put in local chan.hangup and peer's
-    chan.disconnected messages.  + Copy SIP headers and decode ISUP
-    (SIP-T/SIP-I) body to disconnect parameters.  + Preserve the editor
-    buffer when rmanager is in "machine on" mode.  + Simplified code
-    that copies the same parameters to call.route message.  + Always
-    copy parameters listed in "copyparams" to chan.startup of dumbchan.
-    + Added the newer Number Translated and QoR Routing flags to ISUP
-    Forward Call Indicators.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Wed, 02 Mar 2011 02:19:13 +0300
-
-yate (3.1.1.svn4139) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4139: + Delete "peerid" parameter from a
-    forked call.execute as it is incorrect for the new context - the
-    fork master did already replace that peer.  + Fixed building of
-    module.update messages for database modules.  + Enable sending
-    chan.startup/disconnected/hangup messages from the fork master, they
-    are required for proper PBX operation.  + Copy more parameters in
-    the chan.startup of the fork master.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Tue, 01 Mar 2011 02:19:18 +0300
-
-yate (3.1.1.svn4135) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4135: + Changed stream setup and connect
-    default and maximum timeout values.  + Changed stream start timeout
-    values.  + Refuse to configure in a separate build directory if the
-    source path has spaces or special characters in name.  + Fixed
-    building the modules/ilbccodec.yate if the source path contains
-    spaces or some special characters.  + Fixed building qt4 modules
-    outside the source directory.  + Documented changed stream setup
-    minimum allowed value.  + Fixed incomplete command bug in iLBC
-    detection introduced by Rev 4132.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Sat, 26 Feb 2011 02:19:13 +0300
-
-yate (3.1.1.svn4129) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4129: + Use a NamedIterator (faster) to
-    build a roster item from a list of parameters.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Fri, 25 Feb 2011 02:19:18 +0300
-
-yate (3.1.1.svn4128) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4128: + Fixed a double release of a circuit
-    that could cause a race condition leading to multiple calls per
-    circuit.  + Added a fast unsafe iterator for parameters of
-    NamedList.  + Original patch by Allan Sandfeld.  + Prevent adding a
-    NULL parameter to a NamedList.  + Fix a number of inefficient
-    NamedList iterations using O(n^2) steps when they only need O(n)
-    steps.  + Display the proper OPC/DPC in the debug message when
-    sending a SLTA.  + Create yate cluster listener and connections.
-    Send/receive yate messages on cluster streams.  + Use a
-    NamedIterator (faster) to search for contact groups in input list.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Thu, 24 Feb 2011 02:19:33 +0300
-
-yate (3.1.1.svn4123) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4123: + Removed an unnecessary release of
-    the current reset circuit.  + Fixed a double release of a circuit
-    that could cause a race condition leading to multiple calls per
-    circuit.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Wed, 23 Feb 2011 02:19:16 +0300
-
-yate (3.1.1.svn4122) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4122: + The information is instead preserved
-    for possible later retries.  + When attempting RTP forwarding do not
-    reset the SDP information if MGCP connection fails.  + Drop the call
-    if a required circuit setup failed.  + Added a Media Required
-    setting to Call Controllers.  + Constified all TokenDicts in the
-    ysig library.  + Always restart cluster streams with InError flag
-    set.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Tue, 22 Feb 2011 02:19:22 +0300
-
-yate (3.1.1.svn4118) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4118: + This allows proper dynamic addition
-    of links in existing sessions.  + Start a newly created Cisco SLT
-    link if its Session is already operational.  + Added conversion
-    methods between NamedList parameters and XmlElement objects.  +
-    Added cluster stream.  + Authentication username can now be
-    configured for sip accounts.  + Added possibility for pbxassist to
-    match pseudostate "first" - on first key(s) processed.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Sat, 19 Feb 2011 02:19:22 +0300
-
-yate (3.1.1.svn4113) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4113: + Fixed bug: exit read file loop when
-    searched string was found. Don't try to recover incomplete chat
-    entry after reading the session: it will have an incorrect format.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Fri, 18 Feb 2011 02:19:19 +0300
-
-yate (3.1.1.svn4112) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4112: + Outgoing streams can now be forced
-    to use a specified local ip when connecting.  + Allow specifiying
-    stream parameters in stream create command.  + Accept subscription
-    requests that have no Accept: header, assume NOTIFY body will be
-    accepted anyway.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Wed, 16 Feb 2011 02:19:13 +0300
-
-yate (3.1.1.svn4109) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4109: + Do not send back an UPU when
-    receiving a call for on unequipped circuit.  + Process iq stanzas
-    with from attribute matching the account's full jid as sent by the
-    server.  + This can happen when the MTP route is prohibited.  +
-    Release the ISUP call and the circuit when failed to transmit the
-    IAM.  + Don't create chat window/page when receiving chat state
-    notifications.  + Hook chat parent window key press events and
-    redirect them to chat input. Set focus on chat input on success.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Tue, 15 Feb 2011 02:19:22 +0300
-
-yate (3.1.1.svn4104) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4104: + Copy release parameters from
-    chan.disconnected if message-oprefix is set.  + Copy ISUP or ISDN
-    release parameters to the chan.disconnected message.  + Increased
-    the length of m2pa unacknowledged packets queue.
+yate (3.3.3.vir2011120704) UNRELEASED; urgency=low
 
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Fri, 11 Feb 2011 02:19:26 +0300
-
-yate (3.1.1.svn4103) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4103: + Return the chan.disconnected from
-    getDisconnected() with the Channel already set as userData.  + Added
-    a flag for value 0 of Access Delivery Information so it gets
-    propagated.  + This allows propagating or altering release message
-    parameters.  + Copy release parameters from chan.disconnected if
-    message-oprefix is set.  + Copy ISUP or ISDN release parameters to
-    the chan.disconnected message.
+  * Fixed UU IE duplication
 
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Thu, 10 Feb 2011 02:19:18 +0300
-
-yate (3.1.1.svn4100) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4100: + Trigger tree name action when Enter
-    key is pressed on selected item.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Mon, 07 Feb 2011 02:19:12 +0300
-
-yate (3.1.1.svn4099) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4099: + Added a special target "if" to
-    regexroute so a logic AND can be easily constructed on a single
-    line.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Sun, 06 Feb 2011 02:19:18 +0300
-
-yate (3.1.1.svn4098) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4098: + Correctly clean up calls and
-    circuits of ISUP and ISDN trunks.  + fixed typo  + Merge branch
-    'deb' of github.com:vir/yate into deb  + Autostart should be
-    disabled only for some certification or interoperation tests.  +
-    Added possibility to disable the autostart feature of MTP2 and Cisco
-    SLT.  + Added setting (default true) to flush queued MTP2 messages
-    at end of proving.  + Speed up end of proving on receipt of a
-    correctly sequenced MSU.  + Fixed the state machine of MTP2 to
-    always start alignment by OS ->O transition.  + Retrieve the jingle
-    action from 'type' or 'action' attribute. Set them both in sent
-    jingle stanzas.  + Added a hexadecimal conversion function in
-    regexroute.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Sat, 05 Feb 2011 02:19:27 +0300
-
-yate (3.1.1.svn4094) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4094: + Support converting Accept, Suspend
-    and Resume events to and from Yate messages.  + Always resend the
-    bearer change command after deleting a MGCP connection.  + Fixed
-    reporting of SS7 links status.  + Added information to debug
-    problems in dynamic modules unloading.  + This allows proper dynamic
-    construction and destruction of trunks.  + Correctly clean up calls
-    and circuits of ISUP and ISDN trunks.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Fri, 04 Feb 2011 02:19:17 +0300
-
-yate (3.1.1.svn4090) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4090: + Added shared library symlink to dev.
-    package  + ISUP now emits SUS / RES messages on Suspend / Resume
-    events.  + A call.update with operation=accepted will transmit a
-    pending Accept event after merging provided parameters.  + Support
-    converting Accept, Suspend and Resume events to and from Yate
-    messages.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Thu, 03 Feb 2011 02:19:19 +0300
-
-yate (3.1.1.svn4088) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4088: + Set period and buffer size for the
-    input device (fixes packet read interval).
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Wed, 02 Feb 2011 02:19:17 +0300
-
-yate (3.1.1.svn4087) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4087: + Bumped version to 3.1.1 alpha1
-    development.  + Allow signals A (10) and D (13) in ISUP digits.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Tue, 01 Feb 2011 02:19:21 +0300
-
-yate (3.1.0.svn4084) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4084: + Added optional parameter to retrieve
-    the last header or its parameters from a SIP message.  + Fixes bug
-    #237.  + Consistently use the branch from the last Via header in
-    matching transactions.  + Added tonegen.conf to RPM specfile.  +
-    Added setting to disable dropping the call if the remote sends an
-    unknown or unsupported ISUP message in an early call state.  +
-    Translate between SIP Remote-Party-ID fields "party" and "id-type"
-    and Yate parameters "remote_party" and "remote_id_type".  + Bumped
-    version to 3.1.0 release.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Sat, 29 Jan 2011 02:19:12 +0300
-
-yate (3.0.1.svn4078) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4078: + Debian packaging: added new files  +
-    Handle SUS and RES messages - mandatory in ISUP v2.  + Only clear
-    active MGCP signals when entering Connected state, not if already in
-    that state.  + Make sure to turn off any ring signals when a call is
-    answered.  + Renamed RedirectionInformation field "reason-original"
-    to "reason_original" so it gets copied.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Fri, 28 Jan 2011 02:19:27 +0300
-
-yate (3.0.1.svn4075) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4075: + Such condition can happen in a
-    nonstandard STP with multiple local point codes.  + Never advertise
-    a point code from same linkset local address, it must be always
-    allowed by TRA to adjacent node.  + Properly initialize the MTP
-    operational status when attaching an ISUP dynamically at runtime.  +
-    Changed the order of local point code checks so a transparent STP
-    can transfer a message not handled by a local user part.  + Add a
-    raw hex variant of Parameter Compatibility Information for easier
-    forwarding.  + Added flags for Call Diversion Information encoding
-    and decoding.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Thu, 27 Jan 2011 02:19:21 +0300
-
-yate (3.0.1.svn4070) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4070: + Fixed ring end on FXS analog MGCP
-    gateways.  + Added capability to force a ringback to a MGCP gateway
-    from ISDN and ISUP.  + Fixed bug: remove a deleted address book
-    contact from internal list.  + Added thread safe methods used to
-    retrieve a stream's local and remote party jid and check its id.  +
-    Make sure the stream is locked while accessing its local and remote
-    party jid or checking its id.  + More visibly warn about wrong
-    sequences once false positives are eliminated.  + Do not check the
-    sequence numbers of M2UA packets with LinkStatus == OutOfService,
-    let the state machine process them.  + Prevent misrouting or
-    inadvertently handling SS7 messages in silent transfer scenarios.  +
-    Add a short random time to the initial SLTM timer to prevent
-    synchronization between link ends.  + Fixed and simplified the way
-    M2PA is forcibly realigned, wasn't clearing sequence numbers and all
-    machine states.  + Ignore neighbours setting when receiving an UPU,
-    any node can send it.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Wed, 26 Jan 2011 02:19:14 +0300
-
-yate (3.0.1.svn4061) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4061: + Fixed memory leak: release received
-    'starttls' requests after successfully processed.  + Fixed memory
-    leak: release received stream features xml element when starting
-    stream compression.  + Fixed memory leak: release a parsed attribute
-    when a duplicate is found.  + Fixed bug introduced in rev. 4042:
-    return the correct value when processing actions from notification
-    area.  + Fixed bug: update all contact items in the tree when groups
-    list didn't changed.  + Added parameters CCSS Call Indication and
-    CCNR Possible Indicator used by some ISUP supplementary services.  +
-    Update selected contact's actions when its status changed.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Tue, 25 Jan 2011 02:19:13 +0300
-
-yate (3.0.1.svn4054) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4054: + Fixed memory leak: release all xml
-    element data when destroyed.  + Made public the channel's const
-    disconnect parameters.  + Add numeric cause_q931 to disconnect
-    params of h323chan.  + Provide those parameters to the peer call
-    endpoint when disconnecting it.  + Automatically copy disconnect
-    parameters to the chan.hangup message.  + This allows the
-    chan.disconnected message to reconnect the channel elsewhere.  + Do
-    not hangup the signaling channels on disconnection, wait until
-    destruction.  + Fixed memory leak: release database query messages
-    after use.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Sat, 22 Jan 2011 02:19:16 +0300
-
-yate (3.0.1.svn4049) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4049: + For signalling channels made
-    "noconn" an alias for temporary failure, provides better error
-    mapping.  + Make sure the CNF or REL diagnostic holds each parameter
-    code only once.  + Build a list of "No pass on possible"
-    compatibility parameters in "parameters-nopass-release", release the
-    call if the list is not cleared just like "parameters-unhandled-
-    release".  + Fixed memory leak: release the fragment owned by a DOM
-    parser. Release the temporary parser used when loading an xml
-    document from a file.  + Fixed memory leak: release data if failed
-    to parse attribute value.  + Fixed memory leak: release extracted
-    xml tag if invalid.  + Fixed memory leak: clear xml document data
-    when destroyed.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Fri, 21 Jan 2011 02:19:19 +0300
-
-yate (3.0.1.svn4043) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4043: + Added the "No pass on possible"
-    flags decoding to parameter compatibility.  + Propagate the final
-    errors back to the cannel doing overlapped dialing.  + Add a
-    queryrsp=true parameter to dispatched user.roster message when
-    processing a roster query response.  + Optionally drop the
-    conference room when assisted channel is hungup (defaults to yes).
-    + Added generic notification ui. Notify the user when roster query
-    fails.  + Moved notifications related functions upper in the source
-    file to make them accessible to other functions.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Thu, 20 Jan 2011 02:19:16 +0300
-
-yate (3.0.1.svn4037) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4037: + Always update the telephony account
-    selector when handling user.notify messages.  + Added suport to
-    build custom tones from config and specify a tone language. Imported
-    tone descriptions from Asterisk indications.conf.  + Added support
-    to configure the language for tones used by an analog line, group or
-    channel.  + Include A and D in the digits decoded when not following
-    strictly the ISUP standard.  + Set eol-style property to native.  +
-    Fixed SVN property, must be svn:eol-style not eol-style.  + Set the
-    'noroute' prompt on incomplete route if used only to route a call to
-    avoid terminating the script otherwise. Use a tone language if
-    specified in routing.  + Added tones language support to pbx
-    assistant.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Wed, 19 Jan 2011 02:19:17 +0300
-
-yate (3.0.1.svn4030) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4030: + Set enclosed widget's object name to
-    allow access to it.  + Conditionally compile debug message.  + Set
-    movable tabs property in controls showing chat pages to allow them
-    to be moved by the user (works in QT >= 4.5).  + Handle 'query'
-    operation in user.roster messages (request roster from server).
-    Enqueue an user.roster with operation=queryerror when an error is
-    received in response to a roster query request.  + Delay sending
-    presence and requesting the roster when creating an account using
-    the wizard.  + Always update the telephony account selector when
-    handling user.notify messages.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Tue, 18 Jan 2011 02:19:27 +0300
-
-yate (3.0.1.svn4025) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4025: + Fixed bug: add telephony accounts
-    created using the wizard to the telephony account selector.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Sat, 15 Jan 2011 02:19:12 +0300
-
-yate (3.0.1.svn4024) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4024: + Allow table horizontal header text
-    alignment to be specified from designer.  + Align left the text in
-    channels list header.  + Fixed call.drop parameters set when a call
-    is terminated. Set 'busy' reason for incoming, not answered calls.
-    + Account wizard: moved the cancel button to login page.  + Select a
-    single account in join chat room. Select the last one if there is
-    more then one.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Fri, 14 Jan 2011 02:19:18 +0300
-
-yate (3.0.1.svn4019) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4019: + Added new UI elements packaging.  +
-    Fixed unpackaged files listing script  + Fixed bug: lock the engine
-    while searching for a session to accept a received response.  + Set
-    the 'client' parameter from local/remote host when starting SOCKS
-    file transfer.  + Fixed bug: avoid sending entity caps request on
-    s2s incoming stream.  + Match socks wrapper on client/server flag
-    when finding one. Improved debug.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Fri, 24 Dec 2010 02:19:15 +0300
-
-yate (3.0.1.svn4015) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4015: + Moved jabberclient module into yate-
-    qt4 package  + Added support to add custom item types and item
-    statistics (like child count). Added support to add an item
-    indicating its parent. Allow building custom trees.  + Fixed memory
-    leak: remove the old tray icon menu before set a new one.  +
-    Implemented room chat logging.  + Fixed bug: return the buffer
-    length if 2 NULL values are not found in it.  + Conditionally build
-    debug message.  + Pass the correct file offset when decoding a chat
-    entry to see it in debug messages.  + Re-use existing offline chat
-    room data and UI when the user wants to re-join it.  + Change status
-    to offline for all chat rooms belonging to a given account when it
-    goes offline.  + The jabber client engine default value for
-    'printxml' is now 'verbose'.  + Set the correct base class when
-    calling the YCLASS macro in JBEngine descendants.  + Raised the
-    debug level of adding a circuit range.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Thu, 23 Dec 2010 02:19:20 +0300
-
-yate (3.0.1.svn4004) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4004: + Implemented configurable method to
-    send DTMFs: using the protocol, inband, rfc2833 or chat message.  +
-    Send DTMFs using rfc 2833 on calls to google voice.  + Moved
-    jabberclient module into yate-qt4 package
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Wed, 22 Dec 2010 12:53:19 +0300
-
-yate (3.0.1.svn4002) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4002: + Fixed shared libs packaging  + Fixed
-    bug: set the telephone-event payload type to 101 instead of 106.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Wed, 22 Dec 2010 02:19:13 +0300
-
-yate (3.0.1.svn4001) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 4001: + Added missed build dependency  +
-    Added missed dependencyes (codecs)  + Updated building deps for
-    testing/unstable (dahdi)  + Merge branch 'deb' of
-    github.com:vir/yate into deb  + Changed call on hold string shown in
-    status bar.  + Development will go on in 3.0.x, next release will be
-    3.1.0  + Bumped version to 3.0.1 alpha 1.  + Handle jingle session
-    redirect. Don't check the called party jid if requested in
-    call.execute message.  + Don't add a resource when calling a google
-    voice target. Let the jingle channel to redirect the call.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Tue, 21 Dec 2010 17:41:25 +0300
-
-yate (3.0.0.svn3996) UNRELEASED; urgency=low
-
-  * Updated to SVN revision 3996: + Added missed dependencyes (codecs)
-    + Added missed build dependency  + Added yate as dependency of yate-
-    client-common, fixed icon in menus.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Tue, 21 Dec 2010 17:18:24 +0300
-
-yate (3.0.0.svn3995) unstable; urgency=low
-
-  * Updated to SVN revision 3995: + Added missed build dependency  +
-    Bumped version - 3.0.0 release 1.  + Added new file to yate-qt4
-    debian package  + Help file changes by Diana, links point to
-    yateclient.yate.ro  + Added missing Windows Qt modules to new
-    utility project.  + Simplified and corrected the .iss file.  + Added
-    a copy of Online as the 1st menu entry.  + Disabled sorting in the
-    account list to prevent accidentally selecting an irrelevant column.
-    + Remove pending chat notification from chat tabs on docked window
-    activation.  + Set a minimum vertical size to the Account Wizard's
-    buttons.  + Undid Rev 3986 as it prevented the chat window from
-    popping up.  + Make the chat window visible only if not already so
-    to prevent restoring if minimized.  + Changed the tray icon updating
-    logic so existing icons can be reused.  + This prevents the tray
-    icon from being repeatedly deleted and inserted.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Mon, 20 Dec 2010 12:56:00 +0300
-
-yate (3.0.0.svn3986) unstable; urgency=low
-
-  * Updated to SVN revision 3986: + Don't force show chat window when
-    incoming chat is received: it will activate the window.  + Allow
-    calling user@domain from telephony tab on gmail accounts.  + Removed
-    unused variable.  + Don't request confirmation when calling a call
-    log item. Pass the window pointer to the method implementing call
-    log calling.  + Added facebook url in account wizard.  + Changed
-    image.  + Hide advanced account setup controls by default.  + Show
-    docked chat by default.  + Implemented tray icon incoming chat
-    notification.  + Added flash item feature to the widget list (change
-    tab text color).  + Update active flag and notify
-    "window_active_changed" to the client when the application is
-    deactivated.  + Replaced QTextEdit with QTextBrowser in help window.
-    + Handle QTextBrowser widget class when set/get widget text.  +
-    Added packaging of recently added files
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Sun, 19 Dec 2010 14:30:41 +0300
-
-yate (3.0.0.svn3973) unstable; urgency=low
-
-  * Updated to SVN revision 3973: + Updated debian packaging info  +
-    Updated debian packaging info  + Updated debian packaging info  +
-    Added active flag the Window class. Update it when window active
-    state changes. Added client method used to retrieve the active state
-    of a window.  + Add a tray icon to the main window stack when a
-    notification is shown in it. Remove the tray icon when the
-    notifications list is empty, the user clicked the icon or the
-    notification area is hidden due to user actions.  + The custom
-    widget list is now notifying selection changes.  + Changed incoming
-    call tray icon.  + Notify window_active_changed toggle to the client
-    when a window's active state changes.  + Remove incoming call icon
-    when selection changed in the calls list. Add extra text to icon
-    tool tip.  + Show contact status, URI and account in contact list
-    item tool tip.  + Always remove the incoming call icon when the
-    calls page become active.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Fri, 17 Dec 2010 16:29:14 +0300
-
-yate (3.0.0.svn) unstable; urgency=low
-
-  * Updated to SVN revision : + Updated debian packaging info  + Updated
-    debian packaging info
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Fri, 17 Dec 2010 16:25:04 +0300
-
-yate (3.0.0.svn) unstable; urgency=low
-
-  * Updated to SVN revision : + Updated debian packaging info
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Fri, 17 Dec 2010 16:23:10 +0300
-
-yate (3.0.0.svn3965) unstable; urgency=low
-
-  * Updated to SVN revision 3965: + Implemented per window tray icon
-    stack. An icon is now shown. The main window is now hidden when
-    close button is pressed. Change the tray icon when an incoming call
-    is received.  + Don't require a list of parameters when deleting a
-    tray icon.  + Changed handled hide on close property name.  + Handle
-    an optional "show" attribute when updating a system tray icon.  +
-    Got rid of two leftover DebugStub.  + Fixed bug: make sure the
-    channel is alive while calling its method.  + Added missing
-    dependency of modules qt4/*.yate to the yateqt4 library.  + Added a
-    generic make rule that builds MOCs for all modules/qt4.  + Added
-    client archive header to Windows project.  + Fixed ui spacing.  +
-    Added client archive to make files. Added client archive header
-    file.  + Changed default account status to online. Update UI status
-    at startup.  + Added missing SVN EOL property to a number of files.
-    + Fixed signed unsigned comparison.  + Added missing client archive
-    Windows project.  + Implemented chat log (archive).  + Added search
-    and highlight/restore found text feature to custom text widget.  +
-    Allow window flags to be specified for dialogs. Added optional
-    dialog closable flag to prevent a dialog to be closed by the user.
-    + Added new configure --with-qtstatic to accomodate linking to a
-    static Qt.  + Implemented getOptions() for widget list.  + Removed
-    unused method declaration.  + Save/restore splitter widget sizes.  +
-    Fixed bug: don't set the width if the last table column if set to be
-    stretched.  + Fixed debug level for cpu core number update.  +
-    Properly RPM package the new dynamic Qt client library and modules.
-    + Added missing CPU load and congestion control modules to specfile.
-    + Fixed make install and uninstall targets for the new libyateqt4.so
-    and qt4client.h  + Bug fix: check pointer before using it. Fixed
-    some spelling errors in messages presented to the user.  + Changed
-    the format of the accounts, links and interfaces status reported
-    through engine.status. Added accountUsername OID. Modified the
-    monitoring module to deal with the status change and the need to
-    handle the accountUsername OID information.  + Added custom widgets
-    to windows solution and setup script. Changed windows application
-    icon.  + Fixed handling of GetBulkRequest-PDU when it encounters an
-    endOfMibView in the repeating OIDs. Added checks for previously
-    unverified pointers. Fixed some code identation issues.  + Merged
-    providers.conf.default from client branch into trunk.  + Fixed OID
-    encoding/decoding for itu-t, iso and joint-iso-itu-t identifiers.
-    Added check to see if an interrogated OID is part of the known OID
-    tree.  + Merged client logic, qt library and ui changes from client
-    branch into trunk.  + Added jingle rtp audio feature to be
-    advertised in disco info responses.  + Merged socks and file
-    transfer modules changes from client branch into trunk.  + Merged
-    jabber changes from client branch into trunk.  + Broadcast
-    monitor.notify messages.  + Return false after processing
-    monitor.notify message.  + Fixed bug.  + Stop responding to
-    monitor.query messages with name=systemLoad if system cpu load is
-    not supported.  + Added batch files to help developers running Yate
-    from build directory.  + Fixed the OID interrogation for the
-    successor of a given OID.  + Fixed negative integer ASN.1 encoding
-    and decoding.  + Added new modules to Windows build and installer.
-    + Fixed EOL style in SVN.  + Fixed building with Visual Studio.  +
-    Fixed variabile initialization.  + Implemented destructor.  + Made
-    ISUP return properly HandledMSU::NoCircuit when it does not handle
-    the circuit code and only warn the first time.  + Added silent MSU
-    transfer mode (STP without route advertising).  + Fixed SVN eol
-    style for newly added files.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Fri, 17 Dec 2010 16:22:53 +0300
-
-yate (3.0.0.svn3965) unstable; urgency=low
-
-  * Updated to SVN revision 3965: + Implemented per window tray icon
-    stack. An icon is now shown. The main window is now hidden when
-    close button is pressed. Change the tray icon when an incoming call
-    is received.  + Don't require a list of parameters when deleting a
-    tray icon.  + Changed handled hide on close property name.  + Handle
-    an optional "show" attribute when updating a system tray icon.  +
-    Got rid of two leftover DebugStub.  + Fixed bug: make sure the
-    channel is alive while calling its method.  + Added missing
-    dependency of modules qt4/*.yate to the yateqt4 library.  + Added a
-    generic make rule that builds MOCs for all modules/qt4.  + Added
-    client archive header to Windows project.  + Fixed ui spacing.  +
-    Added client archive to make files. Added client archive header
-    file.  + Changed default account status to online. Update UI status
-    at startup.  + Added missing SVN EOL property to a number of files.
-    + Fixed signed unsigned comparison.  + Added missing client archive
-    Windows project.  + Implemented chat log (archive).  + Added search
-    and highlight/restore found text feature to custom text widget.  +
-    Allow window flags to be specified for dialogs. Added optional
-    dialog closable flag to prevent a dialog to be closed by the user.
-    + Added new configure --with-qtstatic to accomodate linking to a
-    static Qt.  + Implemented getOptions() for widget list.  + Removed
-    unused method declaration.  + Save/restore splitter widget sizes.  +
-    Fixed bug: don't set the width if the last table column if set to be
-    stretched.  + Fixed debug level for cpu core number update.  +
-    Properly RPM package the new dynamic Qt client library and modules.
-    + Added missing CPU load and congestion control modules to specfile.
-    + Fixed make install and uninstall targets for the new libyateqt4.so
-    and qt4client.h  + Bug fix: check pointer before using it. Fixed
-    some spelling errors in messages presented to the user.  + Changed
-    the format of the accounts, links and interfaces status reported
-    through engine.status. Added accountUsername OID. Modified the
-    monitoring module to deal with the status change and the need to
-    handle the accountUsername OID information.  + Added custom widgets
-    to windows solution and setup script. Changed windows application
-    icon.  + Fixed handling of GetBulkRequest-PDU when it encounters an
-    endOfMibView in the repeating OIDs. Added checks for previously
-    unverified pointers. Fixed some code identation issues.  + Merged
-    providers.conf.default from client branch into trunk.  + Fixed OID
-    encoding/decoding for itu-t, iso and joint-iso-itu-t identifiers.
-    Added check to see if an interrogated OID is part of the known OID
-    tree.  + Merged client logic, qt library and ui changes from client
-    branch into trunk.  + Added jingle rtp audio feature to be
-    advertised in disco info responses.  + Merged socks and file
-    transfer modules changes from client branch into trunk.  + Merged
-    jabber changes from client branch into trunk.  + Broadcast
-    monitor.notify messages.  + Return false after processing
-    monitor.notify message.  + Fixed bug.  + Stop responding to
-    monitor.query messages with name=systemLoad if system cpu load is
-    not supported.  + Added batch files to help developers running Yate
-    from build directory.  + Fixed the OID interrogation for the
-    successor of a given OID.  + Fixed negative integer ASN.1 encoding
-    and decoding.  + Added new modules to Windows build and installer.
-    + Fixed EOL style in SVN.  + Fixed building with Visual Studio.  +
-    Fixed variabile initialization.  + Implemented destructor.  + Made
-    ISUP return properly HandledMSU::NoCircuit when it does not handle
-    the circuit code and only warn the first time.  + Added silent MSU
-    transfer mode (STP without route advertising).  + Fixed SVN eol
-    style for newly added files.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Fri, 17 Dec 2010 16:22:09 +0300
-
-yate (3.0.0.svn3965) unstable; urgency=low
-
-  * Updated to SVN revision 3965: + Implemented per window tray icon
-    stack. An icon is now shown. The main window is now hidden when
-    close button is pressed. Change the tray icon when an incoming call
-    is received.  + Don't require a list of parameters when deleting a
-    tray icon.  + Changed handled hide on close property name.  + Handle
-    an optional "show" attribute when updating a system tray icon.  +
-    Got rid of two leftover DebugStub.  + Fixed bug: make sure the
-    channel is alive while calling its method.  + Added missing
-    dependency of modules qt4/*.yate to the yateqt4 library.  + Added a
-    generic make rule that builds MOCs for all modules/qt4.  + Added
-    client archive header to Windows project.  + Fixed ui spacing.  +
-    Added client archive to make files. Added client archive header
-    file.  + Changed default account status to online. Update UI status
-    at startup.  + Added missing SVN EOL property to a number of files.
-    + Fixed signed unsigned comparison.  + Added missing client archive
-    Windows project.  + Implemented chat log (archive).  + Added search
-    and highlight/restore found text feature to custom text widget.  +
-    Allow window flags to be specified for dialogs. Added optional
-    dialog closable flag to prevent a dialog to be closed by the user.
-    + Added new configure --with-qtstatic to accomodate linking to a
-    static Qt.  + Implemented getOptions() for widget list.  + Removed
-    unused method declaration.  + Save/restore splitter widget sizes.  +
-    Fixed bug: don't set the width if the last table column if set to be
-    stretched.  + Fixed debug level for cpu core number update.  +
-    Properly RPM package the new dynamic Qt client library and modules.
-    + Added missing CPU load and congestion control modules to specfile.
-    + Fixed make install and uninstall targets for the new libyateqt4.so
-    and qt4client.h  + Bug fix: check pointer before using it. Fixed
-    some spelling errors in messages presented to the user.  + Changed
-    the format of the accounts, links and interfaces status reported
-    through engine.status. Added accountUsername OID. Modified the
-    monitoring module to deal with the status change and the need to
-    handle the accountUsername OID information.  + Added custom widgets
-    to windows solution and setup script. Changed windows application
-    icon.  + Fixed handling of GetBulkRequest-PDU when it encounters an
-    endOfMibView in the repeating OIDs. Added checks for previously
-    unverified pointers. Fixed some code identation issues.  + Merged
-    providers.conf.default from client branch into trunk.  + Fixed OID
-    encoding/decoding for itu-t, iso and joint-iso-itu-t identifiers.
-    Added check to see if an interrogated OID is part of the known OID
-    tree.  + Merged client logic, qt library and ui changes from client
-    branch into trunk.  + Added jingle rtp audio feature to be
-    advertised in disco info responses.  + Merged socks and file
-    transfer modules changes from client branch into trunk.  + Merged
-    jabber changes from client branch into trunk.  + Broadcast
-    monitor.notify messages.  + Return false after processing
-    monitor.notify message.  + Fixed bug.  + Stop responding to
-    monitor.query messages with name=systemLoad if system cpu load is
-    not supported.  + Added batch files to help developers running Yate
-    from build directory.  + Fixed the OID interrogation for the
-    successor of a given OID.  + Fixed negative integer ASN.1 encoding
-    and decoding.  + Added new modules to Windows build and installer.
-    + Fixed EOL style in SVN.  + Fixed building with Visual Studio.  +
-    Fixed variabile initialization.  + Implemented destructor.  + Made
-    ISUP return properly HandledMSU::NoCircuit when it does not handle
-    the circuit code and only warn the first time.  + Added silent MSU
-    transfer mode (STP without route advertising).  + Fixed SVN eol
-    style for newly added files.
-
- -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Fri, 17 Dec 2010 16:16:09 +0300
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Wed, 07 Dec 2011 16:50:23 +0400
+
+yate (3.3.3.vir2011120703) UNRELEASED; urgency=low
+
+  * Fixed UUS IE encoding (missing protocol discrimrnator added)
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Wed, 07 Dec 2011 15:17:12 +0400
+
+yate (3.3.3.vir2011120702) UNRELEASED; urgency=low
+
+  * Added UUS encoding mplementation
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Wed, 07 Dec 2011 14:23:50 +0400
+
+yate (3.3.3.vir2011120701) UNRELEASED; urgency=low
+
+  * Merged upstream changes.
+  * Fix outgoing UUS
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Wed, 07 Dec 2011 11:35:17 +0400
+
+yate (3.3.3.vir2011111801) UNRELEASED; urgency=low
+
+  * Experimantal ISDN UUS support
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Fri, 18 Nov 2011 16:10:15 +0400
+
+yate (3.3.3.vir2011111501) UNRELEASED; urgency=low
+
+  * Merge upstream
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Tue, 15 Nov 2011 09:03:57 +0400
+
+yate (3.3.3.vir2011110903) UNRELEASED; urgency=low
+
+  * new package version finally
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Wed, 09 Nov 2011 16:23:23 +0400
+
+yate (3.3.3.vir2011110902) UNRELEASED; urgency=low
+
+  * Fix wrong package version
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Wed, 09 Nov 2011 16:22:34 +0400
+
+yate (3.3.3.vir2011110901) UNRELEASED; urgency=low
+
+  * Added more new files
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Wed, 09 Nov 2011 16:17:31 +0400
+
+yate (3.3.3.vir2011110902) UNRELEASED; urgency=low
+
+  * added Build-Depends: build-essential
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Wed, 09 Nov 2011 13:43:13 +0400
+
+yate (3.3.3.vir2011110901) UNRELEASED; urgency=low
+
+  * Merged lates upstream changes
+  * Fix building (failed due to isupmangler module path change)
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Wed, 09 Nov 2011 12:05:56 +0400
+
+yate (3.3.3.vir2011090601) UNRELEASED; urgency=low
+
+  * Fixed overlapdial timer threads leak on reload
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Tue, 06 Sep 2011 17:43:09 +0400
+
+yate (3.3.3.vir2011080801) UNRELEASED; urgency=low
+
+  * Merged upstream updates
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Mon, 08 Aug 2011 11:47:56 +0400
+
+yate (3.3.3.vir2011072601) UNRELEASED; urgency=low
+
+  * Fixed crash on overlapdial module unload
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Tue, 26 Jul 2011 18:41:41 +0400
+
+yate (3.3.3.vir2011072501) UNRELEASED; urgency=low
+
+  * Fix timeout-based overlap dialing lost in prev. versions.
+  * Merged upstream changes and fixes.
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Mon, 25 Jul 2011 16:07:30 +0400
+
+yate (3.3.3.vir2011071301) UNRELEASED; urgency=low
+
+  * Merged a lot of upstream changes, most notably, SIP over TCP/TLS
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Wed, 13 Jul 2011 21:32:27 +0400
+
+yate (3.3.3.vir2011063001) UNRELEASED; urgency=low
+
+  * SDP FMTP lines forwarding should now work as expected
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Thu, 30 Jun 2011 15:18:17 +0400
+
+yate (3.3.3.vir2011062601) UNRELEASED; urgency=low
+
+  * Fixed SDP fmtp lines forwarding.
+  * Merged latest upstream changes: fixes and new module 'cache'
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Sun, 26 Jun 2011 09:42:52 +0400
+
+yate (3.3.3.vir2011052702) UNRELEASED; urgency=low
+
+  * Crash fix
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Fri, 27 May 2011 12:33:26 +0400
+
+yate (3.3.3.vir2011052701) UNRELEASED; urgency=low
+
+  * SDP fmtp lines forwarding fix
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Fri, 27 May 2011 12:13:46 +0400
+
+yate (3.3.3.vir2011052601) UNRELEASED; urgency=low
+
+  * SDP fmtp lines forwarding
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Thu, 26 May 2011 18:52:34 +0400
+
+yate (3.3.3.vir2011051601) UNRELEASED; urgency=low
+
+  * Merged marian's QOP implementation
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Mon, 16 May 2011 14:08:31 +0400
+
+yate (3.3.3.vir2011051401) UNRELEASED; urgency=low
+
+  * Merge SIP QOP handling with upstream
+  * New Yate.pm
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Sat, 14 May 2011 10:49:42 +0400
+
+yate (3.3.3.vir2011050401) UNRELEASED; urgency=low
+
+  * Merged upstream updates
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Wed, 04 May 2011 23:03:00 +0400
+
+yate (3.3.3.vir2011050305) UNRELEASED; urgency=low
+
+  * Support "xsip_body_encoding" parameter in xsip.generate message
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Tue, 03 May 2011 22:34:03 +0400
+
+yate (3.3.3.vir2011050304) UNRELEASED; urgency=low
+
+  * FAKE
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Tue, 03 May 2011 14:23:35 +0400
+
+yate (3.3.3.vir2011043001) UNRELEASED; urgency=low
+
+  * Merged upstream fixes
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Sat, 30 Apr 2011 10:39:21 +0400
+
+yate (3.3.3.vir2011042801) UNRELEASED; urgency=low
+
+  * Merged upstream fixes
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Thu, 28 Apr 2011 22:30:19 +0400
+
+yate (3.3.3.vir2011041701) UNRELEASED; urgency=low
+
+  * New debian package. Fixed pidfile-related troubles.
+  * Merged a lot of upstream fixes.
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Sun, 17 Apr 2011 00:09:18 +0400
+
+yate (3.2.1.vir2011032102) UNRELEASED; urgency=low
+
+  * Moved jabberclient.yate from yate-qt4 into libyate package
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Mon, 21 Mar 2011 20:52:22 +0300
+
+yate (3.2.1.vir2011032101) UNRELEASED; urgency=low
+
+  * pulled in upstramm changes (tel: uri support and bug fixes)
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Mon, 21 Mar 2011 16:05:12 +0300
+
+yate (3.2.1.vir2011031401) UNRELEASED; urgency=low
+
+  * Fix bug introduced by recent history rewrite
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Mon, 14 Mar 2011 06:57:58 +0300
+
+yate (3.2.1.vir2011031101) UNRELEASED; urgency=low
+
+  * pulled in upstramm changes
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Fri, 11 Mar 2011 11:29:59 +0300
+
+yate (3.1.1.vir2011021901) UNRELEASED; urgency=low
+
+  * pulled in upstream changes
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Sat, 19 Feb 2011 13:55:49 +0300
+
+yate (3.1.1.vir2011020601) UNRELEASED; urgency=low
+
+  * New Debian stable release out there, we have new versioning scheme for testing and stable ports
+
+ -- Vasily i. Redkin <yatedeb@vir.otvt.ru>  Sun, 06 Feb 2011 13:29:09 +0300
+
+yate (3.1.1.vir2011020102) UNRELEASED; urgency=low
+
+  * Pulled in upstream changes
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Tue, 01 Feb 2011 11:22:30 +0300
+
+yate (3.0.1.vir2011020101) UNRELEASED; urgency=low
+
+  * Changed debian package versioning scheme to YYYYMMDDRR
+
+ -- Vasily i. Redkin <vir@vir.otvt.ru>  Tue, 01 Feb 2011 10:16:25 +0300
 
 yate (3.0.0.vir12647) unstable; urgency=low
 

@@ -27,6 +27,8 @@ package Yate;
 
 use strict;
 use warnings;
+use IO::Handle;
+use POSIX qw(:errno_h);
 
 # Executed before everything.
 BEGIN {
@@ -296,11 +298,31 @@ sub uninstall_watcher($$;$) {
     }
 }
 
+# Connect to a Yate listener and redirect yate interface to connected socket
+sub connect($$;$$$) {
+    my $self = shift;
+    my $addr = shift || die "Nowhere to connect()";
+    my $role = shift || 'global';
+    die "Areaty connected" if $self->{socket};
+    my $domain = ($addr=~/^[\w\.\-]+\:\d+$/)?'INET':'UNIX';
+    eval "require IO::Socket::$domain" or die "Yate::connect: $@";
+    my $sock = eval "new IO::Socket::$domain(\$addr)" or die "Yate::connect: $!";
+    $self->{socket} = $sock;
+    $self->{stdin} = $self->{stdout} = $sock;
+    $self->print(join(':', "%%>connect", map({ $self->escape($_) } $role, @_)));
+}
+
 # Wait for messages on STDIN (default behaviour).
 sub listen($) {
     my ($self) = @_;
 
-    while (my $line = <STDIN>) {
+    my $ret = 0;
+    for(;;) {
+	my $line = $self->{stdin}->getline();
+	die "Read error" unless defined($line) || $! == POSIX::EAGAIN;
+	last unless $line;
+	$ret = 1;
+
 	# Get rid of \n at the end.
 	chomp($line);
 
@@ -309,6 +331,7 @@ sub listen($) {
 	    $self->dispatch();
 	}
     }
+    return $ret;
 }
 
 # Parses messages and splits it to parts.
@@ -577,7 +600,7 @@ sub print($$) {
     if ($message) {
 	$self->debug('Printing ' . $message) if ($self->{'Debug'} == 1);
 
-	print STDOUT $message . "\n";
+	$self->{stdout}->print($message . "\n");
     }
 }
 
@@ -677,6 +700,17 @@ sub dump($) {
     $self->debug(Dumper($self));
 }
 
+# Dump message to STDERR.
+sub dumpmsg($;) {
+    my $self = shift; local $_;
+    my $msg = "Message ".$self->{headers}{name}.(@_?" [ \x1B\[1m@_\x1B\[0m ]":'').":\n";
+    $msg .= " H: ".join(', ', map({ $_.' => '.$self->{headers}{$_} } sort keys %{$self->{headers}}))."\n";
+    foreach(sort keys %{$self->{params}}) {
+	$msg .= "   $_ => ".$self->{params}{$_}."\n";
+    }
+    $self->debug($msg);
+}
+
 # Old subroutines. We keep it for backwards compatibillity.
 sub retval($$) {
     my $self = shift;
@@ -691,8 +725,6 @@ sub retvalue($$) {
 }
 
 1;
-
-# vi: set ts=8 sw=4 sts=4 noet: #
 
 __END__
 
@@ -724,6 +756,7 @@ Yate - Gateway interface module for YATE (Yet Another Telephone Engine)
     }
 
     my $message = new Yate();
+    #$message->connect('127.0.0.1:42428');
     # call.route, call.execute or any other event.
     $message->install('call.route', \&call_route_handler);
     # This processes events from other modules like conference.cpp.
@@ -816,6 +849,14 @@ be uninstalled.
 
 The methods always return undef.
 
+=head2 connect
+
+    $message->connect($addr, [$role, [$id, [$type]]])
+
+connects socket to Yate server's listener, redirects module's input
+and output to that socket and sends %%connect message, then returns.
+Note that Yate object can not be reused for several connections.
+
 =head2 listen
 
     $message->listen()
@@ -906,6 +947,12 @@ trailing \n.
     $message->dump()
 
 Dumps all the information about the current Yate object.
+
+=head2 dumpmsg
+
+    $message->dumpmsg('interesting message')
+
+Dumps message information in slightly better form than dump().
 
 =head2 escape
 
@@ -1084,3 +1131,6 @@ it under the terms of the General Public License (GPL).  For
 more information, see http://www.fsf.org/licenses/gpl.txt
 
 =cut
+
+# vi: set ts=8 sw=4 sts=4 noet: #
+
