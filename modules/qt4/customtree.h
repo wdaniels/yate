@@ -34,6 +34,11 @@ class QtTreeItem;                        // A tree widget item
 class QtCustomTree;                      // A custom tree widget
 class ContactList;                       // A contact list tree
 class ContactItem;                       // A contact list contact
+class ContactItemList;                   // Groups and contact items belonging to them
+
+typedef QList<QTreeWidgetItem*> QtTreeItemList;
+typedef QPair<QTreeWidgetItem*,QString> QtTreeItemKey;
+typedef QPair<String,int> QtTokenDict; 
 
 /**
  * This class holds data about a tree widget container item
@@ -48,15 +53,18 @@ public:
      * @param type Item type
      */
     explicit inline QtTreeItemProps(const String& type)
-	: QtUIWidgetItemProps(type)
+	: QtUIWidgetItemProps(type),
+	m_height(-1)
 	{}
 
-    String m_stateWidget;                // Item widget showing the state
+    int m_height;                        // Item height
+    String m_stateWidget;                // Item widget or column showing the state
     String m_stateExpandedImg;           // Image to show when expanded
     String m_stateCollapsedImg;          // Image to show when collapsed
     String m_toolTip;                    // Tooltip template
     String m_statsWidget;                // Item widget showing statistics while collapsed
     String m_statsTemplate;              // Statistics template (may include ${count} for children count)
+    QBrush m_bg;                         // Item background
 };
 
 
@@ -73,8 +81,9 @@ public:
      * @param id Item id
      * @param type Item type
      * @param text Optional text for item column 0
+     * @param storeExp Set it to true to (re)store item expanded state
      */
-    QtTreeItem(const char* id, int type = Type,	const char* text = 0);
+    QtTreeItem(const char* id, int type = Type,	const char* text = 0, bool storeExp = false);
 
     /**
      * Destructor
@@ -82,11 +91,58 @@ public:
     ~QtTreeItem();
 
     /**
+     * Set a column's text from a list of parameter cname
+     * @param col Column to set
+     * @param cname Column name
+     * @param list The list containing the parameter
+     */
+    inline void setText(int col, const String& cname, const NamedList& list) {
+	    String* s = cname ? list.getParam(cname) : 0;
+	    if (s)
+		QTreeWidgetItem::setText(col,QtClient::setUtf8(*s));
+	}
+
+    /**
+     * Set a column's icon from a list of parameter cname_image
+     * @param col Column to set
+     * @param cname Column name
+     * @param list The list containing the parameter
+     * @param role Set image file path in this role if greater then Qt::UserRole
+     */
+    void setImage(int col, const String& cname, const NamedList& list,
+	    int role = Qt::UserRole);
+
+    /**
+     * Set a column's check state from boolean value
+     * @param col Column to set
+     * @param check Check state
+     */
+    inline void setCheckState(int col, bool check)
+	{ QTreeWidgetItem::setCheckState(col,check ? Qt::Checked : Qt::Unchecked); }
+
+    /**
+     * Set a column's check state from a list of parameter check:cname
+     * @param col Column to set
+     * @param cname Column name
+     * @param list The list containing the parameter
+     */
+    inline void setCheckState(int col, const String& cname, const NamedList& list) {
+	    String* s = cname ? list.getParam("check:" + cname) : 0;
+	    if (s)
+		setCheckState(col,s->toBoolean());
+	}
+
+    /**
      * Retrieve the item id
      * @return Item id
      */
     inline const String& id() const
 	{ return toString(); }
+
+    /**
+     * Save/restore item expanded status
+     */
+    bool m_storeExp;
 };
 
 /**
@@ -101,6 +157,7 @@ class QtCustomTree : public QtTree
     Q_PROPERTY(QStringList _yate_save_props READ saveProps WRITE setSaveProps(QStringList))
     Q_PROPERTY(bool autoExpand READ autoExpand WRITE setAutoExpand(bool))
     Q_PROPERTY(int rowHeight READ rowHeight WRITE setRowHeight(int))
+    Q_PROPERTY(bool _yate_horizontalheader READ getHHeader WRITE setHHeader(bool))
     Q_PROPERTY(QString _yate_itemui READ itemUi WRITE setItemUi(QString))
     Q_PROPERTY(QString _yate_itemstyle READ itemStyle WRITE setItemStyle(QString))
     Q_PROPERTY(QString _yate_itemselectedstyle READ itemSelectedStyle WRITE setItemSelectedStyle(QString))
@@ -110,8 +167,11 @@ class QtCustomTree : public QtTree
     Q_PROPERTY(QString _yate_itemtooltip READ itemTooltip WRITE setItemTooltip(QString))
     Q_PROPERTY(QString _yate_itemstatswidget READ itemStatsWidget WRITE setItemStatsWidget(QString))
     Q_PROPERTY(QString _yate_itemstatstemplate READ itemStatsTemplate WRITE setItemStatsTemplate(QString))
+    Q_PROPERTY(QString _yate_itemheight READ itemHeight WRITE setItemHeight(QString))
+    Q_PROPERTY(QString _yate_itembackground READ itemBg WRITE setItemBg(QString))
     Q_PROPERTY(QString _yate_col_widths READ colWidths WRITE setColWidths(QString))
     Q_PROPERTY(QString _yate_sorting READ sorting WRITE setSorting(QString))
+    Q_PROPERTY(QString _yate_itemsexpstatus READ itemsExpStatus WRITE setItemsExpStatus(QString))
 public:
     /**
      * List item type enumeration
@@ -121,12 +181,27 @@ public:
     };
 
     /**
+     * List item data role
+     */
+    enum ItemDataRole {
+	RoleId = Qt::UserRole + 1,       // Item id (used in headers)
+	RoleCheckable,                   // Column checkable (used in headers)
+	RoleHtmlDelegate,                // Headers: true if a column has a custom html item delegate
+	                                 // Rows: QStringList with data
+	RoleImage,                       // Role containing item image file name
+	RoleBackground,                  // Role containing item background color
+	RoleCount
+    };
+
+    /**
      * Constructor
      * @param name Object name
      * @param params Parameters
      * @param parent Optional parent
+     * @param applyParams Apply parameters (call setParams())
      */
-    QtCustomTree(const char* name, const NamedList& params, QWidget* parent = 0);
+    QtCustomTree(const char* name, const NamedList& params, QWidget* parent = 0,
+	bool applyParams = true);
 
     /**
      * Destructor
@@ -307,6 +382,89 @@ public:
 	{ return addChild(child,atStart ? 0 : -1,parent); }
 
     /**
+     * Add a list of children to a given item
+     * @param list Children to add
+     * @param pos Position to insert. Negative to add after the last child
+     * @param parent The parent item. Set it to 0 to add to the root
+     */
+    void addChildren(QList<QTreeWidgetItem*> list, int pos = -1, QtTreeItem* parent = 0);
+
+    /**
+     * Setup an item. Load its widget if not found
+     * @param item Item to setup
+     */
+    void setupItem(QtTreeItem* item);
+
+    /**
+     * Retrieve and item's row height by type
+     * @param item Item to set
+     * @return Item row height
+     */
+    inline int getItemRowHeight(int type) {
+	    QtTreeItemProps* p = treeItemProps(type);
+	    return (p && p->m_height > 0) ? p->m_height : m_rowHeight;
+	}
+
+    /**
+     * Set and item's row height hint
+     * @param item Item to set
+     */
+    void setItemRowHeight(QTreeWidgetItem* item);
+
+    /**
+     * Retrieve item properties associated with a given type
+     * @param type Item type
+     * @return QtTreeItemProps poinetr or 0 if not found
+     */
+    inline QtTreeItemProps* treeItemProps(int type) {
+	    QtUIWidgetItemProps* pt = QtUIWidget::getItemProps(itemPropsName(type));
+	    return YOBJECT(QtTreeItemProps,pt);
+	}
+
+    /**
+     * Retrieve string data associated with a column
+     * @param buf Destination string
+     * @param item The tree item whose data to retreive
+     * @param column Column to retrieve
+     * @param role Data role to retrieve, defaults to id
+     */
+    inline void getItemData(String& buf, QTreeWidgetItem& item, int column,
+	int role = RoleId)
+	{ QtClient::getUtf8(buf,item.data(column,role).toString()); }
+
+    /**
+     * Retrieve boolean data associated with a column
+     * @param column Column to retrieve
+     * @param role Data role to retrieve
+     * @param item Optional item, use tree header item if 0
+     * @return The boolean value for the given column and role
+     */
+    inline bool getBoolItemData(int column, int role, QTreeWidgetItem* item = 0) {
+	    if (!item)
+		item = headerItem();
+	    return item && item->data(column,role).toBool();
+	}
+
+    /**
+     * Retrieve a column by it's id
+     * @param id The column id to find
+     * @return Column number, -1 if not found
+     */
+    int getColumn(const String& id);
+
+    /**
+     * Show or hide an item
+     * @param item The item
+     * @param show True to show, false to hide
+     */
+    inline void showItem(QtTreeItem& item, bool show) {
+	    if (item.isHidden() != show)
+		return;
+	    item.setHidden(!show);
+	    itemVisibleChanged(item);
+	}
+
+    /**
      * Show or hide empty children.
      * An empty item is an item without children or with all children hidden
      * @param show True to show, false to hide
@@ -347,6 +505,25 @@ public:
      */
     void setRowHeight(int h)
 	{ m_rowHeight = h; }
+
+    /**
+     * Check if the horizontal header is visible
+     * @return True if the horizontal is visible
+     */
+    bool getHHeader() {
+	    QTreeWidgetItem* h = headerItem();
+	    return h && !h->isHidden();
+	}
+
+    /**
+     * Show/hide the horizontal header
+     * @param on True to show the horizontal header, false to hide it
+     */
+    void setHHeader(bool on) {
+	    QTreeWidgetItem* h = headerItem();
+	    if (h)
+		h->setHidden(!on);
+	}
 
     /**
      * Read _yate_itemui property accessor: does nothing
@@ -466,6 +643,32 @@ public:
     void setItemStatsTemplate(QString value);
 
     /**
+     * Read _yate_itemheight property accessor: does nothing
+     * This method is here to stop MOC compiler complaining about missing READ accessor function
+     */
+    QString itemHeight()
+	{ return QString(); }
+
+    /**
+     * Set an item props height
+     * @param value Item props height. Format [type:]height
+     */
+    void setItemHeight(QString value);
+
+    /**
+     * Read _yate_itembackground property accessor: does nothing
+     * This method is here to stop MOC compiler complaining about missing READ accessor function
+     */
+    QString itemBg()
+	{ return QString(); }
+
+    /**
+     * Set an item props background
+     * @param value Item props background. Format [type:]background
+     */
+    void setItemBg(QString value);
+
+    /**
      * Retrieve a comma separated list with column widths
      * @return Comma separated list containing column widths
      */
@@ -481,13 +684,26 @@ public:
      * Retrieve tree sorting string (column and order)
      * @return Sorting string
      */
-    QString sorting();
+    QString sorting()
+	{ return getSorting(); }
 
     /**
      * Set sorting (column and order)
      * @param s Sorting string
      */
     void setSorting(QString s);
+
+    /**
+     * Retrieve items expanded status value
+     * @return Items expanded status value
+     */
+    QString itemsExpStatus();
+
+    /**
+     * Set items expanded status value
+     * param s Items expanded status value
+     */
+    void setItemsExpStatus(QString s);
 
 protected slots:
     /**
@@ -553,6 +769,19 @@ protected:
      * @return Associated item type integer value. QTreeWidgetItem::Type if not found
      */
     int itemType(const String& name) const;
+
+    /**
+     * Retrieve tree sorting
+     * @return Sorting string
+     */
+    virtual QString getSorting();
+
+    /**
+     * Set tree sorting
+     * @param key Sorting key
+     * @param sort Sort order
+     */
+    virtual void updateSorting(const String& key, Qt::SortOrder sort);
 
     /**
      * Build a tree context menu
@@ -626,6 +855,18 @@ protected:
     virtual void itemRemoved(QtTreeItem& item, QtTreeItem* parent);
 
     /**
+     * Handle item visiblity changes
+     * @param item Changed item
+     */
+    virtual void itemVisibleChanged(QtTreeItem& item);
+
+    /**
+     * Uncheck all checkable columns in a given item
+     * @param item The item
+     */
+    virtual void uncheckItem(QtTreeItem& item);
+
+    /**
      * Update a tree item's tooltip
      * @param item Item to update
      */
@@ -645,10 +886,27 @@ protected:
      */
     void applyItemStatistics(QtTreeItem& item);
 
+    /**
+     * Store (update) to or remove from item expanded status storage an item
+     * @param id Item id
+     * @param on Expanded status
+     * @param store True to store, false to remove
+     */
+    void setStoreExpStatus(const String& id, bool on, bool store = true);
+
+    /**
+     * Retrieve the expanded status of an item from storage
+     * @param id Item id
+     * @return 1 if expanded, 0 if collapsed, -1 if not found
+     */
+    int getStoreExpStatus(const String& id);
+
+    bool m_hasCheckableCols;             // True if we have checkable columns
     QMenu* m_menu;                       // Tree context menu
     bool m_autoExpand;                   // Items are expanded when added
     int m_rowHeight;                     // Tree row height
     NamedList m_itemPropsType;           // Tree item type to item props translation
+    QList<QtTokenDict> m_expStatus;      // List of stored item IDs and expanded status
 };
 
 /**
@@ -664,6 +922,7 @@ class ContactList : public QtCustomTree
     Q_PROPERTY(bool _yate_flatlist READ flatList WRITE setFlatList(bool))
     Q_PROPERTY(bool _yate_showofflinecontacts READ showOffline WRITE setShowOffline(bool))
     Q_PROPERTY(bool _yate_hideemptygroups READ hideEmptyGroups WRITE setHideEmptyGroups(bool))
+    Q_PROPERTY(bool _yate_comparecase READ cmpNameCs WRITE setCmpNameCs(bool))
 public:
     /**
      * List item type enumeration
@@ -744,6 +1003,14 @@ public:
     virtual void listChanged();
 
     /**
+     * Find a contact
+     * @param id Contact id
+     * @param list Optional list to be filled with items having the given id
+     * @return ContactItem pointer or 0 if not found
+     */
+    ContactItem* findContact(const String& id, QList<QtTreeItem*>* list = 0);
+
+    /**
      * Retrieve the value of '_yate_nogroup_caption' property
      * @return The value of '_yate_nogroup_caption' property
      */
@@ -802,6 +1069,20 @@ public:
 	}
 
     /**
+     * Retrieve contact name comparison
+     * @return True if contact names are compared case sensitive
+     */
+    bool cmpNameCs()
+	{ return m_compareNameCs == Qt::CaseSensitive; }
+
+    /**
+     * Set contact name comparison
+     * @return True to compare contact names case sensitive
+     */
+    void setCmpNameCs(bool value)
+	{ m_compareNameCs = (value ? Qt::CaseSensitive : Qt::CaseInsensitive); }
+
+    /**
      * Check if a given type is a contact or chat room
      * @param type Type to check
      * @return True if the type is contact or chat room
@@ -820,12 +1101,52 @@ public:
 	    return TypeChatRoom;
 	}
 
+    /**
+     * Create a group item
+     * @param id Group id
+     * @param name Group name
+     * @param expStat Expanded state (re)store indicator
+     * @return Valid QtTreeItem pointer
+     */
+    static inline QtTreeItem* createGroup(const String& id, const String& name, bool expStat) {
+	    QtTreeItem* g = new QtTreeItem(id,TypeGroup,name,expStat);
+	    g->addParam("name",name);
+	    return g;
+	}
+
 protected:
+    /**
+     * Retrieve tree sorting
+     * @return Sorting string
+     */
+    virtual QString getSorting();
+
+    /**
+     * Set tree sorting
+     * @param key Sorting key
+     * @param sort Sort order
+     */
+    virtual void updateSorting(const String& key, Qt::SortOrder sort);
+
+    /**
+     * Optimized add. Set the whole tree
+     * @param list The list of contacts to set
+     */
+    void setContacts(QList<QTreeWidgetItem*>& list);
+
+    /**
+     * Create a contact
+     * @param id Contact id
+     * @param params Contact parameters
+     * @return ContactItem pointer
+     */
+    ContactItem* createContact(const String& id, const NamedList& params);
+
     // Update contact count in a group
     void updateGroupCountContacts(QtTreeItem& item);
 
     // Add or update a contact
-    bool updateContact(const String& id, const NamedList& params, bool atStart);
+    bool updateContact(const String& id, const NamedList& params);
 
     // Update a contact
     bool updateContact(ContactItem& c, const NamedList& params, bool all = true);
@@ -842,12 +1163,6 @@ protected:
     virtual bool updateItem(QtTreeItem& item, const NamedList& params);
 
     /**
-     * Item expanded/collapsed notification
-     * @param item The item
-     */
-    virtual void onItemExpandedChanged(QtTreeItem* item);
-
-    /**
      * Get the context menu associated with a given item
      * @param item The item (can be 0)
      * @return QMenu pointer or 0
@@ -862,6 +1177,14 @@ protected:
     virtual void itemAdded(QtTreeItem& item, QtTreeItem* parent);
 
     /**
+     * Fill a list with item statistics.
+     * The default implementation fills a 'count' parameter with the number of item children
+     * @param item The tree item
+     * @param list The list to fill
+     */
+    virtual void fillItemStatistics(QtTreeItem& item, NamedList& list);
+
+    /**
      * Retrieve a group item from root or create a new one
      * @param name Group name or empry to use the empty group
      * @param create True to create if not found
@@ -870,31 +1193,61 @@ protected:
     QtTreeItem* getGroup(const String& name = String::empty(), bool create = true);
 
     /**
-     * Add a contact to a group item
-     *
+     * Add a contact to the list
+     * @param id Contact id
+     * @param params Contact parameters
      */
-    bool addContactToGroup(const String& id,
-	const NamedList& params, bool atStart, const String& grp = String::empty(),
-	QList<ContactItem*>* bucket = 0, const NamedList* origParams = 0);
+    void addContact(const String& id, const NamedList& params);
 
     /**
-     * Remove a contact from a group item and add it to a list
-     *
+     * Add a contact to a specified parent
+     * @param c The contact to add
+     * @param grp Optional parent
      */
-    void removeContactFromGroup(QList<ContactItem*> list, const String& id,
-	const String& grp = String::empty());
+    void addContact(ContactItem* c, QtTreeItem* parent = 0);
+
+    /**
+     * Replace an existing contact. Remove it and add it again
+     * @param c The contact item
+     * @param params Contact parameters
+     */
+    void replaceContact(ContactItem& c, const NamedList& params);
+
+    /**
+     * Create contact structure (groups and lists)
+     * @param c The contact to add
+     * @param cil Contact structure
+     */
+    void createContactTree(ContactItem* c, ContactItemList& cil);
+
+    /**
+     * Compare two contacts's name
+     * @param c1 First contact
+     * @param c2 Second contact
+     * @return -1 if c1 < c2, 0 if c1 == c2, 1 if c1 > c2
+     */
+    int compareContactName(ContactItem* c1, ContactItem* c2);
+
+    /**
+     * Sort contacts
+     * @param list The list of contacts to sort
+     */
+    void sortContacts(QList<QTreeWidgetItem*>& list);
 
 private:
     int m_savedIndent;
     bool m_flatList;                     // Flat list
     bool m_showOffline;                  // Show or hide offline contacts
     bool m_hideEmptyGroups;              // Show or hide empty groups
-    String m_groupCountWidget;           // The name of the widget used to display
-                                         //  online/count contacts
+    bool m_expStatusGrp;                 // Save/restore groups expanded status
     String m_noGroupText;                // Group text to show for contacts not belonging to any group
     QMap<QString,QString> m_statusOrder; // Status order (names are mapped to status icons)
     QMenu* m_menuContact;
     QMenu* m_menuChatRoom;
+    // Sorting
+    String m_sortKey;                    // Sorting key
+    Qt::SortOrder m_sortOrder;           // Sort order
+    Qt::CaseSensitivity m_compareNameCs; // Contact name case comparison
 };
 
 /**
@@ -907,13 +1260,39 @@ class ContactItem : public QtTreeItem
 public:
     inline ContactItem(const char* id, const NamedList& p = NamedList::empty(),
 	bool contact = true)
-	: QtTreeItem(id,ContactList::contactType(p["type"]),p.getValue("name"))
+	: QtTreeItem(id,ContactList::contactType(p["type"]))
 	{}
     // Build and return a list of groups
     inline ObjList* groups() const
 	{ return Client::splitUnescape((*this)["groups"]); }
+    // Update name. Return true if changed
+    bool updateName(const NamedList& params, Qt::CaseSensitivity cs);
+    // Check if groups would change
+    bool groupsWouldChange(const NamedList& params);
     // Check if the contact status is 'offline'
     bool offline();
+
+    QString m_name;
+};
+
+/**
+ * Utility class used to hold contact groups along with contacts
+ * @short Groups and contact items belonging to them
+ */
+class ContactItemList
+{
+public:
+    /**
+     * Retrieve a group. Create it if not found. Create contact list entry when a group is created
+     * @param id Group id
+     * @param text Group text
+     * @param expStat Expanded state (re)store indicator for created item
+     * @return Valid groups index
+     */
+    int getGroupIndex(const String& id, const String& text, bool expStat);
+
+    QList<QTreeWidgetItem*> m_groups;
+    QList<QtTreeItemList> m_contacts;
 };
 
 }; // anonymous namespace

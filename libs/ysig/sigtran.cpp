@@ -23,6 +23,7 @@
  */
 
 #include "yatesig.h"
+#include <yatephone.h>
 
 #define MAX_UNACK 256
 
@@ -195,6 +196,16 @@ bool SIGTRAN::transmitMSG(unsigned char msgVersion, unsigned char msgClass,
     return trans && trans->transmitMSG(msgVersion,msgClass,msgType,msg,streamId);
 }
 
+bool SIGTRAN::restart(bool force)
+{
+    m_transMutex.lock();
+    RefPointer<SIGTransport> trans = m_trans;
+    m_transMutex.unlock();
+    if (!trans)
+	return false;
+    trans->reconnect(force);
+    return true;
+}
 
 // Attach or detach an user adaptation layer
 void SIGTransport::attach(SIGTRAN* sigtran)
@@ -282,9 +293,9 @@ bool SIGAdaptation::initialize(const NamedList* config)
 {
     if (transport())
 	return true;
-    NamedString* name = config->getParam("sig");
+    NamedString* name = config->getParam(YSTRING("sig"));
     if (!name)
-	name = config->getParam("basename");
+	name = config->getParam(YSTRING("basename"));
     if (name) {
 	DDebug(this,DebugInfo,"Creating transport for SIGTRAN UA [%p]",this);
 	NamedPointer* ptr = YOBJECT(NamedPointer,name);
@@ -513,8 +524,8 @@ SIGAdaptClient::SIGAdaptClient(const char* name, const NamedList* params,
 	Debug(this,DebugInfo,"SIGAdaptClient(%u,%u) created [%p]%s",
 	    payload,port,this,tmp.c_str());
 #endif
-	m_aspId = params->getIntValue("aspid",m_aspId);
-	m_traffic = (TrafficMode)params->getIntValue("traffic",s_trafficModes,m_traffic);
+	m_aspId = params->getIntValue(YSTRING("aspid"),m_aspId);
+	m_traffic = (TrafficMode)params->getIntValue(YSTRING("traffic"),s_trafficModes,m_traffic);
     }
 }
 
@@ -546,6 +557,33 @@ void SIGAdaptClient::detach(SIGAdaptUser* user)
     }
 }
 
+// Status notification from transport layer
+void SIGAdaptClient::notifyLayer(SignallingInterface::Notification status)
+{
+    switch (status) {
+	case SignallingInterface::LinkDown:
+	case SignallingInterface::HardwareError:
+	    switch (m_state) {
+		case AspDown:
+		case AspUpRq:
+		    break;
+		default:
+		    setState(AspUpRq);
+	    }
+	    break;
+	case SignallingInterface::LinkUp:
+	    if (m_state >= AspUpRq) {
+		setState(AspUpRq,false);
+		DataBlock data;
+		if (m_aspId != -1)
+		    addTag(data,0x0011,m_aspId);
+		transmitMSG(ASPSM,AspsmUP,data);
+	    }
+	    break;
+	default:
+	    return;
+    }
+}
 // Request activation of the ASP
 bool SIGAdaptClient::activate()
 {
@@ -563,7 +601,8 @@ bool SIGAdaptClient::activate()
 		DataBlock data;
 		if (m_aspId != -1)
 		    addTag(data,0x0011,m_aspId);
-		return transmitMSG(ASPSM,AspsmUP,data);
+		transmitMSG(ASPSM,AspsmUP,data);
+		return true;
 	    }
 	case AspUp:
 	    setState(AspActRq,false);
@@ -810,14 +849,22 @@ static TokenDict s_state[] = {
     {0,0}
 };
 
+static const TokenDict s_m2pa_dict_control[] = {
+    { "pause",              SS7M2PA::Pause },
+    { "resume",             SS7M2PA::Resume },
+    { "align",              SS7M2PA::Align },
+    { "transport_restart",  SS7M2PA::TransRestart },
+    { 0, 0 }
+};
+
 SS7M2PA::SS7M2PA(const NamedList& params)
     : SignallingComponent(params.safe("SS7M2PA"),&params),
       SIGTRAN(5,3565),
-      m_seqNr(0xffffff), m_needToAck(0xffffff), m_lastAck(0xffffff),
+      m_seqNr(0xffffff), m_needToAck(0xffffff), m_lastAck(0xffffff), m_maxQueueSize(MAX_UNACK),
       m_localStatus(OutOfService), m_state(OutOfService),
       m_remoteStatus(OutOfService), m_transportState(Idle), m_mutex(true,"SS7M2PA"), m_t1(0),
-      m_t2(0), m_t3(0), m_t4(0), m_ackTimer(0), m_confTimer(0),
-      m_autostart(false), m_dumpMsg(false)
+      m_t2(0), m_t3(0), m_t4(0), m_ackTimer(0), m_confTimer(0), m_oosTimer(0),m_waitOosTimer(0),
+      m_autostart(false), m_sequenced(false), m_dumpMsg(false)
 
 {
     // Alignment ready timer ~45s
@@ -832,10 +879,19 @@ SS7M2PA::SS7M2PA(const NamedList& params)
     m_ackTimer.interval(params,"ack_timer",1000,1100,false);
     // Confirmation timer 1/2 t4
     m_confTimer.interval(params,"conf_timer",50,400,false);
+    // Out of service timer
+    m_oosTimer.interval(params,"oos_timer",3000,5000,false);
+    m_waitOosTimer.interval(params,"ack_timer",500,1000,false);
+    m_sequenced = params.getBoolValue(YSTRING("sequenced"),false);
     // Maximum unacknowledged messages, max_unack+1 will force an ACK
-    m_maxUnack = params.getIntValue("max_unack",4);
+    m_maxUnack = params.getIntValue(YSTRING("max_unack"),4);
     if (m_maxUnack > 10)
 	m_maxUnack = 10;
+    m_maxQueueSize = params.getIntValue(YSTRING("max_queue_size"),MAX_UNACK);
+    if (m_maxQueueSize < 16)
+	m_maxQueueSize = 16;
+    if (m_maxQueueSize > 65356)
+	m_maxQueueSize = 65356;
     DDebug(this,DebugAll,"Creating SS7M2PA [%p]",this);
 }
 
@@ -854,13 +910,13 @@ bool SS7M2PA::initialize(const NamedList* config)
 	config->dump(tmp,"\r\n  ",'\'',true);
     Debug(this,DebugInfo,"SS7M2PA::initialize(%p) [%p]%s",config,this,tmp.c_str());
 #endif
-    m_dumpMsg = config && config->getBoolValue("dumpMsg",false);
-    m_autostart = !config || config->getBoolValue("autostart",true);
-    m_autoEmergency = !config || config->getBoolValue("autoemergency",true);
+    m_dumpMsg = config && config->getBoolValue(YSTRING("dumpMsg"),false);
+    m_autostart = !config || config->getBoolValue(YSTRING("autostart"),true);
+    m_autoEmergency = !config || config->getBoolValue(YSTRING("autoemergency"),true);
     if (config && !transport()) {
-	NamedString* name = config->getParam("sig");
+	NamedString* name = config->getParam(YSTRING("sig"));
 	if (!name)
-	    name = config->getParam("basename");
+	    name = config->getParam(YSTRING("basename"));
 	if (name) {
 	    NamedPointer* ptr = YOBJECT(NamedPointer,name);
 	    NamedList* trConfig = ptr ? YOBJECT(NamedList,ptr->userData()) : 0;
@@ -879,6 +935,8 @@ bool SS7M2PA::initialize(const NamedList* config)
 	    SIGTRAN::attach(tr);
 	    if (!tr->initialize(trConfig))
 		SIGTRAN::attach(0);
+	    m_sequenced = config->getBoolValue(YSTRING("sequenced"),transport() ? 
+		transport()->reliable() : false);
 	}
     }
     return transport() && control(Resume,const_cast<NamedList*>(config));
@@ -934,7 +992,7 @@ bool SS7M2PA::processMSG(unsigned char msgVersion, unsigned char msgClass,
     if (!data.length())
 	return true;
     if (msgType == LinkStatus)
-	return processLinkStatus(data,streamId);
+	return m_sequenced ? processSLinkStatus(data,streamId) : processLinkStatus(data,streamId);
 #ifdef DEBUG
     if (streamId != 1)
 	Debug(this,DebugNote,"Received data message on Link status stream");
@@ -948,10 +1006,12 @@ bool SS7M2PA::processMSG(unsigned char msgVersion, unsigned char msgClass,
 bool SS7M2PA::nextBsn(u_int32_t bsn) const
 {
     u_int32_t n = (0x1000000 + m_seqNr - bsn) & 0xffffff;
-    if (n > MAX_UNACK)
+    if (n > m_maxQueueSize) {
+	Debug(this,DebugWarn,"Maximum number of unacknowledged messages reached!!!");
 	return false;
+    }
     n = (0x1000000 + bsn - m_lastAck) & 0xffffff;
-    return (n != 0) && (n <= MAX_UNACK);
+    return (n != 0) && (n <= m_maxQueueSize);
 }
 
 bool SS7M2PA::decodeSeq(const DataBlock& data,u_int8_t msgType)
@@ -976,8 +1036,6 @@ bool SS7M2PA::decodeSeq(const DataBlock& data,u_int8_t msgType)
 	    transmitLS();
 	    return false;
 	}
-	while (nextBsn(bsn))
-	    removeFrame(getNext(m_lastAck));
 	if (bsn == m_lastAck)
 	    return true;
 	// If we are here means that something went wrong
@@ -1008,8 +1066,8 @@ bool SS7M2PA::decodeSeq(const DataBlock& data,u_int8_t msgType)
 	transmitLS();
 	return false;
     }
-    while (nextBsn(bsn))
-	removeFrame(getNext(m_lastAck));
+    while (nextBsn(bsn) && removeFrame(getNext(m_lastAck)))
+	;
     if (bsn != m_lastAck) {
 	abortAlignment(String("Received unexpected bsn: ") << bsn);
 	transmitLS();
@@ -1021,12 +1079,13 @@ bool SS7M2PA::decodeSeq(const DataBlock& data,u_int8_t msgType)
 
 void SS7M2PA::timerTick(const Time& when)
 {
+    SS7Layer2::timerTick(when);
     Lock lock(m_mutex);
-    if (m_confTimer.started() && m_confTimer.timeout(when.msec())) {
+    if (m_confTimer.timeout(when.msec())) {
 	sendAck(); // Acknowledge last received message before endpoint drops down the link
 	m_confTimer.stop();
     }
-    if (m_ackTimer.started() && m_ackTimer.timeout(when.msec())) {
+    if (m_ackTimer.timeout(when.msec())) {
 	m_ackTimer.stop();
 	if (!transport() || transport()->reliable()) {
 	    lock.drop();
@@ -1034,12 +1093,27 @@ void SS7M2PA::timerTick(const Time& when)
 	} else
 	    retransData();
     }
-    if (m_t2.started() && m_t2.timeout(when.msec())) {
-	m_t2.stop();
-	abortAlignment("T2 timeout");
+    if (m_waitOosTimer.timeout(when.msec())) {
+	m_waitOosTimer.stop();
+	setLocalStatus(OutOfService);
+	transmitLS();
+    }
+    if (m_oosTimer.timeout(when.msec())) {
+	m_oosTimer.stop();
+	if (m_transportState == Established)
+	    abortAlignment("Out of service timeout");
+	else
+	    m_oosTimer.start();
 	return;
     }
-    if (m_t3.started() && m_t3.timeout(when.msec())) {
+    if (m_t2.timeout(when.msec())) {
+	abortAlignment("T2 timeout");
+	setLocalStatus(Alignment);
+	transmitLS();
+	m_t2.start();
+	return;
+    }
+    if (m_t3.timeout(when.msec())) {
 	m_t3.stop();
 	abortAlignment("T3 timeout");
 	return;
@@ -1052,16 +1126,17 @@ void SS7M2PA::timerTick(const Time& when)
 	    m_t1.start();
 	    return;
 	}
+	// Retransmit proving state
 	if ((when & 0x3f) == 0)
 	    transmitLS();
     }
-    if (m_t1.started() && m_t1.timeout(when.msec())) {
+    if (m_t1.timeout(when.msec())) {
 	m_t1.stop();
 	abortAlignment("T1 timeout");
     }
 }
 
-void SS7M2PA::removeFrame(u_int32_t bsn)
+bool SS7M2PA::removeFrame(u_int32_t bsn)
 {
     Lock lock(m_mutex);
     for (ObjList* o = m_ackList.skipNull();o;o = o->skipNext()) {
@@ -1072,8 +1147,10 @@ void SS7M2PA::removeFrame(u_int32_t bsn)
 	m_lastAck = bsn;
 	m_ackList.remove(d);
 	m_ackTimer.stop();
-	break;
+	return true;
     }
+    Debug(this,DebugWarn,"Failed to remove frame %d! Frame is missing!",bsn);
+    return false;
 }
 
 void SS7M2PA::setLocalStatus(unsigned int status)
@@ -1082,6 +1159,8 @@ void SS7M2PA::setLocalStatus(unsigned int status)
 	return;
     DDebug(this,DebugInfo,"Local status change %s -> %s [%p]",
 	lookup(m_localStatus,s_state),lookup(status,s_state),this);
+    if (status == Ready)
+	m_ackList.clear();
     m_localStatus = status;
 }
 
@@ -1147,12 +1226,36 @@ unsigned int SS7M2PA::status() const
     return SS7Layer2::OutOfService;
 }
 
-bool SS7M2PA::control(Operation oper, NamedList* params)
+bool SS7M2PA::control(NamedList& params)
+{
+    String* ret = params.getParam(YSTRING("completion"));
+    const String* oper = params.getParam(YSTRING("operation"));
+    const char* cmp = params.getValue(YSTRING("component"));
+    int cmd = oper ? oper->toInteger(s_m2pa_dict_control,-1) : -1;
+    if (ret) {
+	if (oper && (cmd < 0))
+	    return false;
+	String part = params.getValue(YSTRING("partword"));
+	if (cmp) {
+	    if (toString() != cmp)
+		return false;
+	    for (const TokenDict* d = s_m2pa_dict_control; d->token; d++)
+		Module::itemComplete(*ret,d->token,part);
+	    return true;
+	}
+	return Module::itemComplete(*ret,toString(),part);
+    }
+    if (!(cmp && toString() == cmp))
+	return false;
+    return (cmd >= 0) && control((M2PAOperations)cmd,&params);
+}
+
+bool SS7M2PA::control(M2PAOperations oper, NamedList* params)
 {
     if (params) {
-	m_autostart = params->getBoolValue("autostart",m_autostart);
-	m_autoEmergency = params->getBoolValue("autoemergency",m_autoEmergency);
-	m_maxUnack = params->getIntValue("max_unack",m_maxUnack);
+	m_autostart = params->getBoolValue(YSTRING("autostart"),m_autostart);
+	m_autoEmergency = params->getBoolValue(YSTRING("autoemergency"),m_autoEmergency);
+	m_maxUnack = params->getIntValue(YSTRING("max_unack"),m_maxUnack);
 	if (m_maxUnack > 10)
 	    m_maxUnack = 10;
     }
@@ -1173,6 +1276,8 @@ bool SS7M2PA::control(Operation oper, NamedList* params)
 	}
 	case Status:
 	    return operational();
+	case TransRestart:
+	    return restart(true);
 	default:
 	    return false;
     }
@@ -1182,7 +1287,9 @@ void SS7M2PA::startAlignment(bool emergency)
 {
     setLocalStatus(OutOfService);
     transmitLS();
-    setLocalStatus(Alignment);
+    if (!m_sequenced)
+	setLocalStatus(Alignment);
+    m_oosTimer.start();
     SS7Layer2::notify();
 }
 
@@ -1190,6 +1297,8 @@ void SS7M2PA::transmitLS(int streamId)
 {
     if (m_transportState != Established)
 	return;
+    if (m_state == OutOfService)
+	m_localStatus = OutOfService;
     DataBlock data;
     setHeader(data);
     u_int8_t ms[4];
@@ -1223,13 +1332,16 @@ void SS7M2PA::abortAlignment(const String& info)
     m_needToAck = m_lastAck = m_seqNr = 0xffffff;
     m_confTimer.stop();
     m_ackTimer.stop();
+    m_oosTimer.stop();
     m_t2.stop();
     m_t3.stop();
     m_t4.stop();
     m_t1.stop();
-    if (m_state == ProvingNormal || m_state == ProvingEmergency)
+    if (m_state == ProvingNormal || m_state == ProvingEmergency) {
 	startAlignment();
-    else
+	if (m_sequenced)
+	    m_waitOosTimer.start();
+    } else
 	SS7Layer2::notify();
 }
 
@@ -1245,6 +1357,7 @@ bool SS7M2PA::processLinkStatus(DataBlock& data,int streamId)
 	lookup(status,s_state),lookup(m_localStatus,s_state),lookup(m_state,s_state));
     switch (status) {
 	case Alignment:
+	    m_oosTimer.stop();
 	    if (m_t2.started()) {
 		m_t2.stop();
 		setLocalStatus(m_state);
@@ -1287,12 +1400,10 @@ bool SS7M2PA::processLinkStatus(DataBlock& data,int streamId)
 	    setRemoteStatus(status);
 	    m_lastSeqRx = -1;
 	    SS7Layer2::notify();
-	    if (m_t3.started())
-		m_t3.stop();
-	    if (m_t4.started())
-		m_t4.stop();
-	    if (m_t1.started())
-		m_t1.stop();
+	    m_oosTimer.stop();
+	    m_t3.stop();
+	    m_t4.stop();
+	    m_t1.stop();
 	    break;
 	case ProcessorRecovered:
 	    transmitLS();
@@ -1308,6 +1419,7 @@ bool SS7M2PA::processLinkStatus(DataBlock& data,int streamId)
 	    SS7Layer2::notify();
 	    break;
 	case OutOfService:
+	    m_oosTimer.stop();
 	    if (m_localStatus == Ready) {
 		abortAlignment("Received : LinkStatus Out of service, local status Ready");
 		SS7Layer2::notify();
@@ -1315,11 +1427,117 @@ bool SS7M2PA::processLinkStatus(DataBlock& data,int streamId)
 	    if ((m_state == ProvingNormal || m_state == ProvingEmergency)) {
 		if (m_localStatus == Alignment) {
 		    transmitLS();
-		    m_t2.start();
+		    if (!m_t2.started())
+			m_t2.start();
 		} else if (m_localStatus == OutOfService)
 		    startAlignment();
 		else
-		    return false;
+		    abortAlignment("Recv remote OOS");
+	    }
+	    setRemoteStatus(status);
+	    break;
+	default:
+	    Debug(this,DebugNote,"Received unknown link status message %d",status);
+	    return false;
+    }
+    return true;
+}
+
+bool SS7M2PA::processSLinkStatus(DataBlock& data,int streamId)
+{
+    if (data.length() < 4)
+	return false;
+    u_int32_t status = (data[0] << 24) | (data[1] << 16) | (data[2] << 8) | data[3];
+    if (m_remoteStatus == status && status != OutOfService)
+	return true;
+    if (m_waitOosTimer.started())
+	return true;
+    Debug(this,DebugAll,"Received link status: %s, local status : %s, requested status %s",
+	lookup(status,s_state),lookup(m_localStatus,s_state),lookup(m_state,s_state));
+    switch (status) {
+	case Alignment:
+	    m_oosTimer.stop();
+	    if (m_localStatus == Alignment && m_t2.started()) {
+		m_t2.stop();
+		if (m_state == ProvingNormal || m_state == ProvingEmergency) {
+		    setLocalStatus(m_state);
+		    transmitLS();
+		    m_t3.start();
+		}
+	    } else if (m_localStatus == OutOfService) {
+		setLocalStatus(Alignment);
+		transmitLS();
+		m_t3.start();
+	    } else
+		abortAlignment("Out of order alignment message");
+	    setRemoteStatus(status);
+	    break;
+	case ProvingNormal:
+	case ProvingEmergency:
+	    if (m_localStatus == Alignment && m_t3.started()) {
+		m_t3.stop();
+		setLocalStatus(status);
+		transmitLS();
+		if (status == ProvingEmergency || m_state == ProvingEmergency)
+		    m_t4.fire(Time::msecNow() + (m_t4.interval() / 16));
+		else
+		    m_t4.start();
+	    } else if (m_localStatus == ProvingNormal || m_localStatus == ProvingEmergency) {
+		m_t3.stop();
+		if (status == ProvingEmergency || m_state == ProvingEmergency)
+		    m_t4.fire(Time::msecNow() + (m_t4.interval() / 16));
+		else
+		    m_t4.start();
+	    } else
+		abortAlignment("Out of order proving message");
+	    setRemoteStatus(status);
+	    break;
+	case Ready:
+	    if (m_localStatus == ProvingNormal || m_localStatus == ProvingEmergency) {
+		setLocalStatus(Ready);
+		transmitLS();
+	    } else if (m_localStatus != Ready) {
+		abortAlignment("Out of order Ready message");
+		return true;
+	    }
+	    setRemoteStatus(status);
+	    m_lastSeqRx = -1;
+	    SS7Layer2::notify();
+	    m_oosTimer.stop();
+	    m_t3.stop();
+	    m_t4.stop();
+	    m_t1.stop();
+	    break;
+	case ProcessorRecovered:
+	    transmitLS();
+	    setRemoteStatus(status);
+	    break;
+	case BusyEnded:
+	    setRemoteStatus(Ready);
+	    SS7Layer2::notify();
+	    break;
+	case ProcessorOutage:
+	case Busy:
+	    setRemoteStatus(status);
+	    SS7Layer2::notify();
+	    break;
+	case OutOfService:
+	    if (!(m_state == ProvingNormal || m_state == ProvingEmergency)) {
+		abortAlignment("Requested Pause");
+		setRemoteStatus(status);
+		return true;
+	    }
+	    if (m_localStatus == OutOfService) {
+		m_oosTimer.stop();
+		setLocalStatus(Alignment);
+		transmitLS();
+		if (!m_t2.started())
+		    m_t2.start();
+	    } else if (m_localStatus == Alignment)
+		transmitLS();
+	    else {
+		abortAlignment("Remote OOS");
+		m_waitOosTimer.fire(Time::msecNow() + (m_waitOosTimer.interval() / 2));
 	    }
 	    setRemoteStatus(status);
 	    break;
@@ -1332,6 +1550,10 @@ bool SS7M2PA::processLinkStatus(DataBlock& data,int streamId)
 
 void SS7M2PA::recoverMSU(int sequence)
 {
+    if (operational()) {
+	Debug(this,DebugMild,"Recover MSU from sequence %d while link is operational",sequence);
+	return;
+    }
     Debug(this,DebugInfo,"Recovering MSUs from sequence %d",sequence);
     for (;;) {
 	m_mutex.lock();
@@ -1382,6 +1604,8 @@ bool SS7M2PA::transmitMSU(const SS7MSU& msu)
     if (!transport())
 	return false;
     Lock lock(m_mutex);
+    if (!operational())
+	return false;
     DataBlock packet;
     increment(m_seqNr);
     setHeader(packet);
@@ -1470,10 +1694,13 @@ bool SS7M2UAClient::processMSG(unsigned char msgVersion, unsigned char msgClass,
 SS7M2UA::SS7M2UA(const NamedList& params)
     : SignallingComponent(params.safe("SS7M2UA"),&params),
       m_retrieve(50),
-      m_iid(params.getIntValue("iid",-1)), m_linkState(LinkDown), m_rpo(false)
+      m_iid(params.getIntValue(YSTRING("iid"),-1)),
+      m_linkState(LinkDown), m_rpo(false),
+      m_longSeq(false)
 {
     DDebug(DebugInfo,"Creating SS7M2UA [%p]",this);
     m_retrieve.interval(params,"retrieve",5,200,true);
+    m_longSeq = params.getBoolValue(YSTRING("longsequence"));
     m_lastSeqRx = -2;
 }
 
@@ -1485,13 +1712,13 @@ bool SS7M2UA::initialize(const NamedList* config)
 	config->dump(tmp,"\r\n  ",'\'',true);
     Debug(this,DebugInfo,"SS7M2UA::initialize(%p) [%p]%s",config,this,tmp.c_str());
 #endif
-    m_autostart = !config || config->getBoolValue("autostart",true);
-    m_autoEmergency = !config || config->getBoolValue("autoemergency",true);
+    m_autostart = !config || config->getBoolValue(YSTRING("autostart"),true);
+    m_autoEmergency = !config || config->getBoolValue(YSTRING("autoemergency"),true);
     if (config && !adaptation()) {
-	m_iid = config->getIntValue("iid",m_iid);
-	NamedString* name = config->getParam("client");
+	m_iid = config->getIntValue(YSTRING("iid"),m_iid);
+	NamedString* name = config->getParam(YSTRING("client"));
 	if (!name)
-	    name = config->getParam("basename");
+	    name = config->getParam(YSTRING("basename"));
 	if (name) {
 	    DDebug(this,DebugInfo,"Creating adaptation '%s' for SS7 M2UA [%p]",
 		name->c_str(),this);
@@ -1520,8 +1747,9 @@ bool SS7M2UA::initialize(const NamedList* config)
 bool SS7M2UA::control(Operation oper, NamedList* params)
 {
     if (params) {
-	m_autostart = params->getBoolValue("autostart",m_autostart);
-	m_autoEmergency = params->getBoolValue("autoemergency",m_autoEmergency);
+	m_autostart = params->getBoolValue(YSTRING("autostart"),m_autostart);
+	m_autoEmergency = params->getBoolValue(YSTRING("autoemergency"),m_autoEmergency);
+	m_longSeq = params->getBoolValue(YSTRING("longsequence"),m_longSeq);
     }
     switch (oper) {
 	case Pause:
@@ -1649,6 +1877,7 @@ int SS7M2UA::getSequence()
 
 void SS7M2UA::timerTick(const Time& when)
 {
+    SS7Layer2::timerTick(when);
     if (m_retrieve.timeout(when.msec())) {
 	m_retrieve.stop();
 	if (m_lastSeqRx == -2) {
@@ -1764,7 +1993,7 @@ bool SS7M2UA::processMAUP(unsigned char msgType, const DataBlock& msg, int strea
 			break;
 		    }
 		    Debug(this,DebugInfo,"Recovered sequence number %u",res);
-		    if (res & 0xffffff80)
+		    if (m_longSeq || res & 0xffffff80)
 			res = (res & 0x00ffffff) | 0x01000000;
 		    m_lastSeqRx = res;
 		    postRetrieve();
@@ -1891,7 +2120,7 @@ bool ISDNIUAClient::processMSG(unsigned char msgVersion, unsigned char msgClass,
 ISDNIUA::ISDNIUA(const NamedList& params, const char *name, u_int8_t tei)
     : SignallingComponent(params.safe(name ? name : "ISDNIUA"),&params),
       ISDNLayer2(params,name,tei),
-      m_iid(params.getIntValue("iid",-1))
+      m_iid(params.getIntValue(YSTRING("iid"),-1))
 {
     DDebug(DebugInfo,"Creating ISDNIUA [%p]",this);
 }
@@ -2091,12 +2320,12 @@ bool ISDNIUA::initialize(const NamedList* config)
 	config->dump(tmp,"\r\n  ",'\'',true);
     Debug(this,DebugInfo,"ISDNIUA::initialize(%p) [%p]%s",config,this,tmp.c_str());
 #endif
-    m_autostart = !config || config->getBoolValue("autostart",true);
+    m_autostart = !config || config->getBoolValue(YSTRING("autostart"),true);
     if (config && !adaptation()) {
-	m_iid = config->getIntValue("iid",m_iid);
-	NamedString* name = config->getParam("client");
+	m_iid = config->getIntValue(YSTRING("iid"),m_iid);
+	NamedString* name = config->getParam(YSTRING("client"));
 	if (!name)
-	    name = config->getParam("basename");
+	    name = config->getParam(YSTRING("basename"));
 	if (name) {
 	    DDebug(this,DebugInfo,"Creating adaptation '%s' for ISDN UA [%p]",
 		name->c_str(),this);

@@ -1457,6 +1457,7 @@ bool ZapDevice::select(unsigned int usec)
 
 int ZapDevice::recv(void* buffer, int len)
 {
+    errno = 0;
     int r = ::read(m_handle,buffer,len);
     if (r >= 0) {
 	m_event = false;
@@ -1477,12 +1478,15 @@ int ZapDevice::recv(void* buffer, int len)
 
 int ZapDevice::send(const void* buffer, int len)
 {
+    errno = 0;
     int w = ::write(m_handle,buffer,len);
     if (w == len) {
 	m_writeError = false;
 	return w;
     }
-    if (!m_writeError) {
+    if (errno == ELAST)
+	m_event = true;
+    else if (!m_writeError) {
 	Debug(m_owner,DebugWarn,
 	    "%sWrite failed on channel %u (sent %d instead of %d). %d: %s [%p]",
 	    m_name.safe(),m_channel,w>=0?w:0,len,errno,::strerror(errno),m_owner);
@@ -2058,7 +2062,7 @@ bool ZapSpan::init(ZapDevice::Type type, unsigned int offset,
     if (!digital)
 	m_increment = chans = count;
     m_increment = config.getIntValue("increment",m_increment);
-    unsigned int start = params.getIntValue("start",0);
+    unsigned int start = config.getIntValue("start",params.getIntValue("start",0));
 
     // Create and insert circuits
     unsigned int added = 0;

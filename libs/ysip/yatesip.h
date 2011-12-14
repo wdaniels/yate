@@ -59,12 +59,17 @@ class SIPEvent;
 class YSIP_API SIPParty : public RefObject
 {
 public:
-    SIPParty();
-    SIPParty(bool reliable);
+    SIPParty(Mutex* mutex = 0);
+    SIPParty(bool reliable, Mutex* mutex = 0);
     virtual ~SIPParty();
     virtual void transmit(SIPEvent* event) = 0;
     virtual const char* getProtoName() const = 0;
     virtual bool setParty(const URI& uri) = 0;
+    virtual void* getTransport() = 0;
+    void setAddr(const String& addr, int port, bool local);
+    void getAddr(String& addr, int& port, bool local);
+    inline Mutex* mutex()
+	{ return m_mutex; }
     inline const String& getLocalAddr() const
 	{ return m_local; }
     inline const String& getPartyAddr() const
@@ -76,8 +81,8 @@ public:
     inline bool isReliable() const
 	{ return m_reliable; }
 protected:
+    Mutex* m_mutex;
     bool m_reliable;
-    bool m_init;
     String m_local;
     String m_party;
     int m_localPort;
@@ -104,6 +109,7 @@ public:
 	RportAfterBranch  = 0x0008,
 	NotSetRport       = 0x0010,
 	NotSetReceived    = 0x0020,
+	NoConnReuse       = 0x0040,      // Don't add 'alias' parameter to Via header (reliable only)
     };
 
     /**
@@ -118,8 +124,14 @@ public:
 
     /**
      * Creates a new SIPMessage from parsing a text buffer.
+     * @param ep Party to set in message
+     * @param buf Buffer to parse
+     * @param len Optional buffer length
+     * @param bodyLen Pointer to body length to be set if the message was received
+     *  on a stream transport. If not 0 the buffer must contain the message
+     *  without its body
      */
-    SIPMessage(SIPParty* ep, const char* buf, int len = -1);
+    SIPMessage(SIPParty* ep, const char* buf, int len = -1, unsigned int* bodyLen = 0);
 
     /**
      * Creates a new SIPMessage as answer to another message.
@@ -138,9 +150,24 @@ public:
 
     /**
      * Construct a new SIP message by parsing a text buffer
+     * @param ep Party to set in message
+     * @param buf Buffer to parse
+     * @param len Optional buffer length
+     * @param bodyLen Pointer to body length to be set if the message was received
+     *  on a stream transport. If not 0 the buffer must contain the message
+     *  without its body
      * @return A pointer to a valid new message or NULL
      */
-    static SIPMessage* fromParsing(SIPParty* ep, const char* buf, int len = -1);
+    static SIPMessage* fromParsing(SIPParty* ep, const char* buf, int len = -1,
+	unsigned int* bodyLen = 0);
+
+    /**
+     * Build message's body. Reset it before.
+     * This method should be called after parsing a partial message (headers only)
+     * @param buf Buffer to parse
+     * @param len Optional buffer length
+     */
+    void buildBody(const char* buf, int len = -1);
 
     /**
      * Complete missing fields with defaults taken from a SIP engine
@@ -311,17 +338,19 @@ public:
      * @param meth Method to include in the authorization digest
      * @param uri URI to include in the authorization digest
      * @param proxy Set to true to authenticate to a proxy, false to a server
+     * @param engine Optional engine processing this message
      * @return A new authorization line to be used in a new transaction
      */
     MimeAuthLine* buildAuth(const String& username, const String& password,
-	const String& meth, const String& uri, bool proxy = false) const;
+	const String& meth, const String& uri, bool proxy = false, SIPEngine* engine = 0) const;
 
     /**
      * Construct a new authorization line based on this answer and original message
      * @param original Origianl outgoing message
+     * @param engine Optional engine processing this message
      * @return A new authorization line to be used in a new transaction
      */
-    MimeAuthLine* buildAuth(const SIPMessage& original) const;
+    MimeAuthLine* buildAuth(const SIPMessage& original, SIPEngine* engine = 0) const;
 
     /**
      * Prepare the message for automatic client transaction authentication.
@@ -409,7 +438,7 @@ public:
     MimeBody* body;
 
 protected:
-    bool parse(const char* buf, int len);
+    bool parse(const char* buf, int len, unsigned int* bodyLen);
     bool parseFirst(String& line);
     SIPParty* m_ep;
     bool m_valid;
@@ -757,6 +786,12 @@ public:
     inline void setTransmit()
 	{ m_transmit = true; }
 
+    /**
+     * Change transaction status to Cleared
+     * This method is not thread safe
+     */
+    inline void setCleared()
+	{ changeState(Cleared); }
 
     /**
      * Send back an authentication required response
@@ -1158,6 +1193,22 @@ public:
     u_int64_t getTimer(char which, bool reliable = false) const;
 
     /**
+     * Get the number of times to send a SIP request.
+     * This value applies only when retransmission is required
+     * @return The number of times to send a SIP request
+     */
+    inline unsigned int getReqTransCount() const
+	{ return m_reqTransCount; }
+
+    /**
+     * Get the number of times to send a response to a SIP request.
+     * This value applies only when retransmission is required
+     * @return The number of times to send a response to a SIP request
+     */
+    inline unsigned int getRspTransCount() const
+	{ return m_rspTransCount; }
+
+    /**
      * Get the default value of the Max-Forwards header for this engine
      * @return The maximum number of hops the request is allowed to pass
      */
@@ -1211,6 +1262,12 @@ public:
     long nonceAge(const String& nonce);
 
     /**
+     * Get a nonce count
+     * @param nc String reference to fill with new nonce count
+     */
+    void ncGet(String& nc);
+
+    /**
      * Build an authentication response
      * @param username User account name
      * @param realm Authentication realm
@@ -1219,9 +1276,11 @@ public:
      * @param method Method of the SIP message that is being authenticated
      * @param uri URI of the SIP message that is being authenticated
      * @param response String to store the computed response
+     * @param qop Optional quality of protection type (set in list name) and parameters
      */
     static void buildAuth(const String& username, const String& realm, const String& passwd,
-	const String& nonce, const String& method, const String& uri, String& response);
+	const String& nonce, const String& method, const String& uri, String& response,
+	const NamedList& qop = NamedList::empty());
 
     /**
      * Build an authentication response from already hashed components
@@ -1282,12 +1341,15 @@ protected:
 
     u_int64_t m_t1;
     u_int64_t m_t4;
+    int m_reqTransCount;
+    int m_rspTransCount;
     unsigned int m_maxForwards;
     int m_cseq;
     int m_flags;
     bool m_lazyTrying;
     String m_userAgent;
     String m_allowed;
+    u_int32_t m_nc;
     String m_nonce;
     String m_nonce_secret;
     u_int32_t m_nonce_time;

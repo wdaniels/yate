@@ -28,6 +28,8 @@ using namespace TelEngine;
 
 const String XmlElement::s_ns = "xmlns";
 const String XmlElement::s_nsPrefix = "xmlns:";
+static const String s_type("type");
+static const String s_name("name");
 
 
 // Return a replacement char for the given string
@@ -122,6 +124,14 @@ bool XmlSaxParser::parse(const char* text)
 {
     if (TelEngine::null(text))
 	return m_error == NoError;
+#ifdef XDEBUG
+    String tmp;
+    m_parsed.dump(tmp," ");
+    if (tmp)
+	tmp = " parsed=" + tmp;
+    XDebug(this,DebugAll,"XmlSaxParser::parse(%s) unparsed=%u%s buf=%s [%p]",
+	text,unparsed(),tmp.safe(),m_buf.safe(),this);
+#endif
     char car;
     setError(NoError);
     String auxData;
@@ -134,7 +144,7 @@ bool XmlSaxParser::parse(const char* text)
     if (unparsed()) {
 	if (unparsed() != Text) {
 	    if (!auxParse())
-		return setError(Incomplete);
+		return false;
 	}
 	else
 	    auxData = m_parsed;
@@ -196,7 +206,7 @@ bool XmlSaxParser::parse(const char* text)
 	if (!parseElement())
 	    return false;
     }
-    if (len > 0 && !completed()) {
+    if (!completed()) {
 	// We have an element that is not complete
 	auxData << m_buf;
 	m_parsed.assign(auxData);
@@ -279,62 +289,80 @@ bool XmlSaxParser::parseEndTag()
 // Parse an instruction form the main buffer
 bool XmlSaxParser::parseInstruction()
 {
-    if (!m_buf.c_str()) {
-	setUnparsed(Instruction);
-	return false;
-    }
-    skipBlanks();
+    XDebug(this,DebugAll,"XmlSaxParser::parseInstruction() buf len=%u [%p]",m_buf.length(),this);
+    setUnparsed(Instruction);
+    if (!m_buf.c_str())
+	return setError(Incomplete);
     // extract the name
     String name;
     char c;
     int len = 0;
-    while (m_buf.at(len) && !m_parsed.c_str()) {
-	c = m_buf.at(len);
-	if (!blank(c) && c != '?') {
-	    if (checkNameCharacter(c)) {
-		len++;
-		continue;
-	    }
-	    else {
-		setError(InvalidElementName);
+    if (!m_parsed) {
+	bool nameComplete = false;
+	bool endDecl = false;
+	while (0 != (c = m_buf.at(len))) {
+	    nameComplete = blank(c);
+	    if (!nameComplete) {
+		// Check for instruction end: '?>'
+		if (c == '?') {
+		    char next = m_buf.at(len + 1);
+		    if (!next)
+			return setError(Incomplete);
+		    if (next == '>') {
+			nameComplete = endDecl = true;
+			break;
+		    }
+		}
+		if (checkNameCharacter(c)) {
+		    len++;
+		    continue;
+		}
 		Debug(this,DebugNote,"Instruction name contains bad character '%c' [%p]",c,this);
-		return false;
+		return setError(InvalidElementName);
 	    }
-	}
-	if (len == 0) {
-	    setError(InvalidElementName);
+	    // Blank found
+	    if (len)
+	        break;
 	    Debug(this,DebugNote,"Instruction with empty name [%p]",this);
-	    return false;
+	    return setError(InvalidElementName);
 	}
+	if (!len) {
+	    if (!endDecl)
+		return setError(Incomplete);
+	    // Remove instruction end from buffer
+	    m_buf = m_buf.substr(2);
+	    Debug(this,DebugNote,"Instruction with empty name [%p]",this);
+	    return setError(InvalidElementName);
+	}
+	if (!nameComplete)
+	    return setError(Incomplete);
 	name = m_buf.substr(0,len);
-	m_buf = m_buf.substr(len);
-	break;
+	m_buf = m_buf.substr(!endDecl ? len : len + 2);
+	if (name == YSTRING("xml")) {
+	    if (!endDecl)
+		return parseDeclaration();
+	    resetParsed();
+	    resetError();
+	    setUnparsed(None);
+	    gotDeclaration(NamedList::empty());
+	    return error() == NoError;
+	}
+	// Instruction name can't be xml case insensitive
+	if (name.length() == 3 && name.startsWith("xml",false,true)) {
+	    Debug(this,DebugNote,"Instruction name '%s' reserved [%p]",name.c_str(),this);
+	    return setError(InvalidElementName);
+	}
     }
-    if (m_parsed.c_str()) {
+    else {
 	name = m_parsed;
 	resetParsed();
     }
-    if (!name.c_str()) {
-	if (error() && error() == Incomplete)
-	    setUnparsed(Instruction);
-	return false;
-    }
-    if (name.startsWith("xml")) {
-	return parseDeclaration();
-    }
-    if (name.startsWith("xml",false,true)) {
-	setError(InvalidElementName);
-	Debug(this,DebugNote,"Instruction name begin with bad character set %s [%p]",
-	    name.c_str(),this);
-	return false;
-    }
-    NamedString inst(name);
+    // Retrieve instruction content
     skipBlanks();
     len = 0;
-    while (m_buf.at(len)) {
-	c = m_buf.at(len);
+    while (0 != (c = m_buf.at(len))) {
 	if (c != '?') {
-	    if (c == '>' || c == 0x0c) {
+	    if (c == 0x0c) {
 		setError(Unknown);
 		Debug(this,DebugNote,"Xml instruction with unaccepted character '%c' [%p]",
 		    c,this);
@@ -343,38 +371,33 @@ bool XmlSaxParser::parseInstruction()
 	    len++;
 	    continue;
 	}
-	if (!m_buf.at(len + 1))
-	    break;
 	char ch = m_buf.at(len + 1);
+	if (!ch)
+	    break;
 	if (ch == '>') { // end of instruction
-	    inst << m_buf.substr(0,len);
-	    resetError();
-	    if (!inst.c_str()) {
-		setError(Unknown);
-		Debug(this,DebugNote,"Empty instruction [%p]",this);
-		return false;
-	    }
-            gotProcessing(inst);// TODO call an callback for process instruction
-            resetParsed();
-	    if (error())
-		return false;
+	    NamedString inst(name,m_buf.substr(0,len));
+	    // Parsed instruction: remove instruction end from buffer and reset parsed
 	    m_buf = m_buf.substr(len + 2);
-	    return true;
+	    resetParsed();
+	    resetError();
+	    setUnparsed(None);
+	    gotProcessing(inst);
+	    return error() == NoError;
 	}
 	len ++;
     }
     // If we are here mens that text has reach his bounds is an error or we need to receive more data
-    setError(Incomplete);
-    return false;
+    m_parsed.assign(name);
+    return setError(Incomplete);
 }
 
 // Parse a declaration form the main buffer
 bool XmlSaxParser::parseDeclaration()
 {
-    if (!m_buf.c_str()) {
-	setUnparsed(Declaration);
+    XDebug(this,DebugAll,"XmlSaxParser::parseDeclaration() buf len=%u [%p]",m_buf.length(),this);
+    setUnparsed(Declaration);
+    if (!m_buf.c_str())
 	return setError(Incomplete);
-    }
     NamedList dc("xml");
     if (m_parsed.count()) {
 	dc.copyParams(m_parsed);
@@ -389,19 +412,18 @@ bool XmlSaxParser::parseDeclaration()
 	    skipBlanks();
 	    NamedString* s = getAttribute();
 	    if (!s) {
-		if (error() && error() == Incomplete) {
-		    setUnparsed(Declaration);
-		    m_parsed.copyParams(dc);
-		}
+		if (error() == Incomplete)
+		    m_parsed = dc;
 		return false;
 	    }
 	    len = 0;
 	    if (dc.getParam(s->name())) {
 		Debug(this,DebugNote,"Duplicate attribute '%s' in declaration [%p]",
 		    s->name().c_str(),this);
+		TelEngine::destruct(s);
 		return setError(DeclarationParse);
 	    }
-	    dc.setParam(s);
+	    dc.addParam(s);
 	    char ch = m_buf.at(len);
 	    if (ch && !blank(ch) && ch != '?') {
 		Debug(this,DebugNote,"No blanks between attributes in declaration [%p]",this);
@@ -414,18 +436,17 @@ bool XmlSaxParser::parseDeclaration()
 	    break;
 	char ch = m_buf.at(len);
 	if (ch == '>') { // end of declaration
+	    // Parsed declaration: remove declaration end from buffer and reset parsed
 	    resetError();
-	    gotDeclaration(dc);
 	    resetParsed();
-	    if (error())
-		return false;
+	    setUnparsed(None);
 	    m_buf = m_buf.substr(len + 1);
-	    return true;
+	    gotDeclaration(dc);
+	    return error() == NoError;
 	}
 	Debug(this,DebugNote,"Invalid declaration ending char '%c' [%p]",ch,this);
 	return setError(DeclarationParse);
     }
-    setUnparsed(Declaration);;
     m_parsed.copyParams(dc);
     setError(Incomplete);
     return false;
@@ -481,7 +502,7 @@ bool XmlSaxParser::parseSpecial()
 	setUnparsed(Special);
 	return setError(Incomplete);
     }
-    if (m_buf.substr(0,2) == "--") {
+    if (m_buf.startsWith("--")) {
 	m_buf = m_buf.substr(2);
 	if (!parseComment())
 	    return false;
@@ -491,13 +512,13 @@ bool XmlSaxParser::parseSpecial()
 	setUnparsed(Special);
 	return setError(Incomplete);
     }
-    if (m_buf.substr(0,7) == "[CDATA[") {
+    if (m_buf.startsWith("[CDATA[")) {
 	m_buf = m_buf.substr(7);
 	if (!parseCData())
 	    return false;
 	return true;
     }
-    if (m_buf.substr(0,7) == "DOCTYPE") {
+    if (m_buf.startsWith("DOCTYPE")) {
 	m_buf = m_buf.substr(7);
 	if (!parseDoctype())
 	    return false;
@@ -1092,7 +1113,8 @@ void XmlDomParser::gotDoctype(const String& doc)
 // TODO implement it see what to do
 void XmlDomParser::gotProcessing(const NamedString& instr)
 {
-    DDebug(this,DebugStub,"gotProcessing('---> %s <---') not implemented",instr.c_str());
+    DDebug(this,DebugStub,"gotProcessing(%s=%s) not implemented [%p]",
+	instr.name().c_str(),instr.safe(),this);
 }
 
 // Create a new xml declaration, verifies the version and encoding
@@ -1392,7 +1414,8 @@ void XmlFragment::toString(String& dump, bool escape, const String& indent,
 }
 
 // Find a completed xml element in a list
-XmlElement* XmlFragment::findElement(ObjList* list, const String* name, const String* ns)
+XmlElement* XmlFragment::findElement(ObjList* list, const String* name, const String* ns,
+    bool noPrefix)
 {
     XmlElement* e = 0;
     for (; list; list = list->skipNext()) {
@@ -1401,7 +1424,11 @@ XmlElement* XmlFragment::findElement(ObjList* list, const String* name, const St
 	    continue;
 	if (name || ns) {
 	    if (!ns) {
-		if (*name == e->toString())
+		if (noPrefix) {
+		    if (*name == e->unprefixedTag())
+			break;
+		}
+		else if (*name == e->toString())
 		    break;
 	    }
 	    else if (name) {
@@ -1899,14 +1926,14 @@ XmlElement* XmlElement::param2xml(NamedString* param, const String& tag, bool co
     if (!(param && param->name() && tag))
 	return 0;
     XmlElement* xml = new XmlElement(tag);
-    xml->setAttribute("name",param->name());
-    xml->setAttributeValid("value",*param);
+    xml->setAttribute(s_name,param->name());
+    xml->setAttributeValid(YSTRING("value"),*param);
     NamedPointer* np = YOBJECT(NamedPointer,param);
     if (!(np && np->userData()))
 	return xml;
     DataBlock* db = YOBJECT(DataBlock,np->userData());
     if (db) {
-	xml->setAttribute("type","DataBlock");
+	xml->setAttribute(s_type,"DataBlock");
 	Base64 b(db->data(),db->length(),false);
 	String tmp;
 	b.encode(tmp);
@@ -1916,7 +1943,7 @@ XmlElement* XmlElement::param2xml(NamedString* param, const String& tag, bool co
     }
     XmlElement* element = YOBJECT(XmlElement,np->userData());
     if (element) {
-	xml->setAttribute("type","XmlElement");
+	xml->setAttribute(s_type,"XmlElement");
 	if (!copyXml) {
 	    np->takeData();
 	    xml->addChild(element);
@@ -1927,7 +1954,7 @@ XmlElement* XmlElement::param2xml(NamedString* param, const String& tag, bool co
     }
     NamedList* list = YOBJECT(NamedList,np->userData());
     if (list) {
-	xml->setAttribute("type","NamedList");
+	xml->setAttribute(s_type,"NamedList");
 	xml->addText(list->c_str());
 	unsigned int n = list->length();
 	for (unsigned int i = 0; i < n; i++)
@@ -1940,20 +1967,20 @@ XmlElement* XmlElement::param2xml(NamedString* param, const String& tag, bool co
 // Build a list parameter from xml element
 NamedString* XmlElement::xml2param(XmlElement* xml, const String* tag, bool copyXml)
 {
-    const char* name = xml ? xml->attribute("name") : 0;
+    const char* name = xml ? xml->attribute(s_name) : 0;
     if (TelEngine::null(name))
 	return 0;
     GenObject* gen = 0;
-    String* type = xml->getAttribute("type");
+    String* type = xml->getAttribute(s_type);
     if (type) {
-	if (*type == "DataBlock") {
+	if (*type == YSTRING("DataBlock")) {
 	    gen = new DataBlock;
 	    const String& text = xml->getText();
 	    Base64 b((void*)text.c_str(),text.length(),false);
 	    b.decode(*(static_cast<DataBlock*>(gen)));
 	    b.clear(false);
 	}
-	else if (*type == "XmlElement") {
+	else if (*type == YSTRING("XmlElement")) {
 	    if (!copyXml)
 		gen = xml->pop();
 	    else {
@@ -1962,7 +1989,7 @@ NamedString* XmlElement::xml2param(XmlElement* xml, const String* tag, bool copy
 		    gen = new XmlElement(*tmp);
 	    }
 	}
-	else if (*type == "NamedList") {
+	else if (*type == YSTRING("NamedList")) {
 	    gen = new NamedList(xml->getText());
 	    xml2param(*(static_cast<NamedList*>(gen)),xml,tag,copyXml);
 	}
@@ -1970,8 +1997,8 @@ NamedString* XmlElement::xml2param(XmlElement* xml, const String* tag, bool copy
 	    Debug(DebugStub,"XmlElement::xml2param: unhandled type=%s",type->c_str());
     }
     if (!gen)
-	return new NamedString(name,xml->attribute("value"));
-    return new NamedPointer(name,gen,xml->attribute("value"));
+	return new NamedString(name,xml->attribute(YSTRING("value")));
+    return new NamedPointer(name,gen,xml->attribute(YSTRING("value")));
 }
 
 // Build and add list parameters from XML element children

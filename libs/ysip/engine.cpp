@@ -70,10 +70,12 @@ static TokenDict sip_responses[] = {
     { "Interval Too Brief", 423 },
     { "Use Identity Header", 428 },
     { "Provide Referrer Identity", 429 },
+    { "Flow Failed", 430 },                                // RFC5626
     { "Anonymity Disallowed", 433 },
     { "Bad Identity-Info", 436 },
     { "Unsupported Certificate", 437 },
     { "Invalid Identity Header", 438 },
+    { "First Hop Lacks Outbound Support", 439 },           // RFC5626
     { "Consent Needed", 470 },
     { "Temporarily Unavailable", 480 },
     { "Call/Transaction Does Not Exist", 481 },
@@ -108,14 +110,14 @@ static TokenDict sip_responses[] = {
 
 TokenDict* TelEngine::SIPResponses = sip_responses;
 
-SIPParty::SIPParty()
-    : m_reliable(false)
+SIPParty::SIPParty(Mutex* mutex)
+    : m_mutex(mutex), m_reliable(false), m_localPort(0), m_partyPort(0)
 {
     DDebug(DebugAll,"SIPParty::SIPParty() [%p]",this);
 }
 
-SIPParty::SIPParty(bool reliable)
-    : m_reliable(reliable)
+SIPParty::SIPParty(bool reliable, Mutex* mutex)
+    : m_mutex(mutex), m_reliable(reliable), m_localPort(0), m_partyPort(0)
 {
     DDebug(DebugAll,"SIPParty::SIPParty(%d) [%p]",reliable,this);
 }
@@ -123,6 +125,24 @@ SIPParty::SIPParty(bool reliable)
 SIPParty::~SIPParty()
 {
     DDebug(DebugAll,"SIPParty::~SIPParty() [%p]",this);
+}
+
+void SIPParty::setAddr(const String& addr, int port, bool local)
+{
+    Lock lock(m_mutex);
+    String& a = local ? m_local : m_party;
+    int& p = local ? m_localPort : m_partyPort;
+    a = addr;
+    p = port;
+    DDebug(DebugAll,"SIPParty updated %s address '%s:%d' [%p]",
+	local ? "local" : "remote",a.c_str(),p,this);
+}
+
+void SIPParty::getAddr(String& addr, int& port, bool local)
+{
+    Lock lock(m_mutex);
+    addr = local ? m_local : m_party;
+    port = local ? m_localPort : m_partyPort;
 }
 
 
@@ -149,9 +169,10 @@ SIPEvent::~SIPEvent()
 
 SIPEngine::SIPEngine(const char* userAgent)
     : Mutex(true,"SIPEngine"),
-      m_t1(500000), m_t4(5000000), m_maxForwards(70),
+      m_t1(500000), m_t4(5000000), m_reqTransCount(5), m_rspTransCount(6),
+      m_maxForwards(70),
       m_cseq(0), m_flags(0), m_lazyTrying(false),
-      m_userAgent(userAgent), m_nonce_time(0),
+      m_userAgent(userAgent), m_nc(0), m_nonce_time(0),
       m_nonce_mutex(false,"SIPEngine::nonce")
 {
     debugName("sipengine");
@@ -160,7 +181,7 @@ SIPEngine::SIPEngine(const char* userAgent)
 	m_userAgent << "YATE/" << YATE_VERSION;
     m_allowed = "ACK";
     char tmp[32];
-    ::snprintf(tmp,sizeof(tmp),"%08x",::rand() ^ (int)Time::now());
+    ::snprintf(tmp,sizeof(tmp),"%08x",(int)(Random::random() ^ Time::now()));
     m_nonce_secret = tmp;
 }
 
@@ -290,7 +311,6 @@ void SIPEngine::processEvent(SIPEvent *event)
 {
     if (!event)
 	return;
-    Lock lock(this);
     const char* type = "unknown";
     if (event->isOutgoing())
 	type = "outgoing";
@@ -423,6 +443,19 @@ long SIPEngine::nonceAge(const String& nonce)
     return Time::secNow() - t;
 }
 
+// Get a nonce count
+void SIPEngine::ncGet(String& nc)
+{
+    m_nonce_mutex.lock();
+    if (!(++m_nc))
+	++m_nc;
+    u_int32_t val = m_nc;
+    m_nonce_mutex.unlock();
+    char tmp[9];
+    ::sprintf(tmp,"%08x",val);
+    nc = tmp;
+}
+
 bool SIPEngine::checkUser(const String& username, const String& realm, const String& nonce,
     const String& method, const String& uri, const String& response,
     const SIPMessage* message, GenObject* userData)
@@ -436,8 +469,10 @@ bool SIPEngine::checkAuth(bool noUser, const SIPMessage* message, GenObject* use
 }
 
 // response = md5(md5(username:realm:password):nonce:md5(method:uri))
+// qop=auth --> response = md5(md5(username:realm:password):nonce:nc:cnonce:qop:md5(method:uri))
 void SIPEngine::buildAuth(const String& username, const String& realm, const String& passwd,
-    const String& nonce, const String& method, const String& uri, String& response)
+    const String& nonce, const String& method, const String& uri, String& response,
+    const NamedList& qop)
 {
     XDebug(DebugAll,"SIP Building auth: '%s:%s:%s' '%s' '%s:%s'",
 	username.c_str(),realm.c_str(),passwd.c_str(),nonce.c_str(),method.c_str(),uri.c_str());
@@ -445,7 +480,15 @@ void SIPEngine::buildAuth(const String& username, const String& realm, const Str
     m1 << username << ":" << realm << ":" << passwd;
     m2 << method << ":" << uri;
     String tmp;
-    tmp << m1.hexDigest() << ":" << nonce << ":" << m2.hexDigest();
+    tmp << m1.hexDigest() << ":" << nonce << ":";
+    if (qop) {
+	if (qop == YSTRING("auth"))
+	    tmp << qop[YSTRING("nc")] << ":" << qop[YSTRING("cnonce")] << ":" << qop.c_str() << ":";
+	else
+	    Debug(DebugStub,"SIPEngine::buildAuth() not implemented for qop=%s",
+		qop.c_str());
+    }
+    tmp << m2.hexDigest();
     m1.clear();
     m1.update(tmp);
     response = m1.hexDigest();

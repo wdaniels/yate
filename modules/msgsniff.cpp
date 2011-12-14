@@ -27,7 +27,7 @@
 using namespace TelEngine;
 namespace { // anonymous
 
-static const char* s_bools[] =
+static const char* s_debugs[] =
 {
     "on",
     "off",
@@ -37,6 +37,7 @@ static const char* s_bools[] =
     "false",
     "yes",
     "no",
+    "filter",
     0
 };
 
@@ -64,6 +65,8 @@ public:
 };
 
 static bool s_active = true;
+static Regexp s_filter;
+static Mutex s_mutex(false,"FilterSniff");
 
 static void dumpParams(const Message &msg, String& par)
 {
@@ -82,30 +85,43 @@ static void dumpParams(const Message &msg, String& par)
 
 bool SniffHandler::received(Message &msg)
 {
-    if (msg == "engine.timer")
+    if (msg == YSTRING("engine.timer"))
 	return false;
-    if (msg == "engine.command") {
+    if (msg == YSTRING("engine.command")) {
 	static const String name("sniffer");
-	String line(msg.getValue("line"));
+	String line(msg.getValue(YSTRING("line")));
 	if (line.startSkip(name)) {
 	    line >> s_active;
-	    msg.retValue() << "Message sniffer is " << (s_active ? "on" : "off") << "\r\n";
+	    line.trimSpaces();
+	    if (line.startSkip("filter")) {
+		s_mutex.lock();
+		s_filter = line;
+		s_mutex.unlock();
+	    }
+	    msg.retValue() << "Message sniffer is " << (s_active ? "on" : "off");
+	    if (s_active && s_filter)
+		msg.retValue() << " filter " << s_filter;
+	    msg.retValue() << "\r\n";
 	    return true;
 	}
-	line = msg.getParam("partline");
+	line = msg.getParam(YSTRING("partline"));
 	if (line.null()) {
-	    if (name.startsWith(msg.getValue("partword")))
+	    if (name.startsWith(msg.getValue(YSTRING("partword"))))
 		msg.retValue().append(name,"\t");
 	}
 	else if (name == line) {
-	    line = msg.getValue("partword");
-	    for (const char** b = s_bools; *b; b++)
+	    line = msg.getValue(YSTRING("partword"));
+	    for (const char** b = s_debugs; *b; b++)
 		if (line.null() || String(*b).startsWith(line))
 		    msg.retValue().append(*b,"\t");
 	}
     }
     if (!s_active)
 	return false;
+    Lock lock(s_mutex);
+    if (s_filter && !s_filter.matches(msg))
+	return false;
+    lock.drop();
     String par;
     dumpParams(msg,par);
     Output("Sniffed '%s' time=%u.%06u%s\r\n  thread=%p '%s'\r\n  data=%p\r\n  retval='%s'%s",
@@ -124,12 +140,22 @@ bool SniffHandler::received(Message &msg)
 
 void HookHandler::dispatched(const Message& msg, bool handled)
 {
-    if ((!s_active) || (msg == "engine.timer"))
+    if ((!s_active) || (msg == YSTRING("engine.timer")))
 	return;
+    Lock lock(s_mutex);
+    if (s_filter && !s_filter.matches(msg))
+	return;
+    lock.drop();
     u_int64_t dt = Time::now() - msg.msgTime().usec();
     String par;
     dumpParams(msg,par);
-    Output("Returned %s '%s' delay=%u.%06u%s\r\n  thread=%p '%s'\r\n  data=%p\r\n  retval='%s'%s",
+    const char* rval = msg.retValue().c_str();
+    const char* rsep = "'";
+    if (handled && rval && (rval[0] != '-' || rval[1]) && (msg == YSTRING("user.auth"))) {
+	rval = "(hidden)";
+	rsep = "";
+    }
+    Output("Returned %s '%s' delay=%u.%06u%s\r\n  thread=%p '%s'\r\n  data=%p\r\n  retval=%s%s%s%s",
 	String::boolText(handled),
 	msg.c_str(),
 	(unsigned int)(dt / 1000000),
@@ -138,7 +164,7 @@ void HookHandler::dispatched(const Message& msg, bool handled)
 	Thread::current(),
 	Thread::currentName(),
 	msg.userData(),
-	msg.retValue().c_str(),
+	rsep,rval,rsep,
 	par.safe());
 }
 
@@ -156,6 +182,9 @@ void MsgSniff::initialize()
     if (m_first) {
 	m_first = false;
 	s_active = Engine::config().getBoolValue("general","msgsniff",false);
+	s_mutex.lock();
+	s_filter = Engine::config().getValue("general","filtersniff");
+	s_mutex.unlock();
 	Engine::install(new SniffHandler);
 	Engine::self()->setHook(new HookHandler);
     }

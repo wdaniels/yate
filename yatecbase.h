@@ -814,6 +814,8 @@ public:
 	OptDockedChat,                   // Show all contacts chat in the same window
 	OptDestroyChat,                  // Destroy contact chat when contact is removed/destroyed
 	OptNotifyChatState,              // Notify chat states
+	OptShowEmptyChat,                // Display received empty chat in chat history
+	OptSendEmptyChat,                // Send empty chat
 	OptCount
     };
 
@@ -822,6 +824,7 @@ public:
      */
     enum TrayIconType {
 	TrayIconMain = 0,
+	TrayIconInfo = 1000,
 	TrayIconIncomingChat = 3000,
 	TrayIconNotification = 5000,
 	TrayIconIncomingCall = 10000,
@@ -1646,6 +1649,13 @@ public:
      */
     static void generateGuid(String& buf, const String& extra = String::empty());
 
+    /**
+     * Replace plain text chars with HTML escape or markup
+     * @param buf Destination string
+     * @param spaceEol True to replace end of line with space instead of html markup
+     */
+    static void plain2html(String& buf, bool spaceEol = false);
+
     static Configuration s_settings;     // Client settings
     static Configuration s_actions;      // Logic preferrences
     static Configuration s_accounts;     // Accounts
@@ -1960,7 +1970,7 @@ protected:
     inline bool peerHasSource(Message& msg) {
     	    CallEndpoint* ch = getPeer();
 	    if (!ch)
-		ch = static_cast<CallEndpoint*>(msg.userObject("CallEndpoint"));
+		ch = static_cast<CallEndpoint*>(msg.userObject(YSTRING("CallEndpoint")));
 	    return ch && ch->getSource();
 	}
     // Check if our consumer's source sent any data
@@ -2607,7 +2617,7 @@ public:
      * @return The remote party (may be empty)
      */
     static const String& cdrRemoteParty(const NamedList& params, bool outgoing)
-	{ return outgoing ? params["called"] : params["caller"]; }
+	{ return outgoing ? params[YSTRING("called")] : params[YSTRING("caller")]; }
 
     /**
      * Retrieve the remote party from CDR parameters
@@ -2615,10 +2625,10 @@ public:
      * @return The remote party (may be empty)
      */
     static const String& cdrRemoteParty(const NamedList& params) {
-	    const String& dir = params["direction"];
-	    if (dir == "incoming")
+	    const String& dir = params[YSTRING("direction")];
+	    if (dir == YSTRING("incoming"))
 		return cdrRemoteParty(params,true);
-	    if (dir == "outgoing")
+	    if (dir == YSTRING("outgoing"))
 		return cdrRemoteParty(params,false);
 	    return String::empty();
 	}
@@ -3048,6 +3058,20 @@ public:
      */
     virtual void engineStart(Message& msg);
 
+    /**
+     * Build an account id from protocol, username, host
+     * @param id Destination string
+     * @param proto Account protocol
+     * @param user Account username
+     * @param host Account host
+     * @return Destination string address
+     */
+    static inline String& buildAccountId(String& id, const String& proto,
+	const String& user, const String& host) {
+	    id = proto + ":" + user + "@" + host;
+	    return id;
+	}
+
 protected:
     /**
      * Method called by the client when idle.
@@ -3226,12 +3250,19 @@ private:
     bool handleMucResNotify(Message& msg, ClientAccount* acc, const String& contact,
 	const String& instance, const String& operation);
     // Show/hide the notification area (messages).
-    // Update rows if requested
-    bool showNotificationArea(bool show, Window* wnd, NamedList* upd = 0);
+    // Update rows if requested. Add/remove tray notification/info icon
+    bool showNotificationArea(bool show, Window* wnd, NamedList* upd = 0,
+	const char* notif = "notification");
+    // Show a roster change or failure notification
+    void showUserRosterNotification(ClientAccount* a, const String& oper,
+	Message& msg, const String& contactUri = String::empty(),
+	bool newContact = true);
     // Handle actions from notification area. Return true if handled
     bool handleNotificationAreaAction(const String& action, Window* wnd);
     // Save a contact to config. Save chat rooms if the contact is a chat room
     bool storeContact(ClientContact* c);
+    // Handle ok from account password/credentials input window
+    bool handleAccCredInput(Window* wnd, const String& name, bool inputPwd);
 
     ClientAccountList* m_accounts;       // Accounts list (always valid)
 };
@@ -3305,28 +3336,28 @@ public:
      * @return The account's protocol
      */
     inline const String& protocol() const
-	{ return m_params["protocol"]; }
+	{ return m_params[YSTRING("protocol")]; }
 
     /**
      * Check if the account's protocol has chat support
      * @return True if this account has chat support
      */
     inline bool hasChat() const
-	{ return protocol() == "jabber"; }
+	{ return protocol() == YSTRING("jabber"); }
 
     /**
      * Check if the account's protocol has presence support
      * @return True if this account has presence support
      */
     inline bool hasPresence() const
-	{ return protocol() == "jabber"; }
+	{ return protocol() == YSTRING("jabber"); }
 
     /**
      * Check if the account should be logged in at startup
      * @return True if the account should be logged in at startup
      */
     inline bool startup() const
-	{ return m_params.getBoolValue("enabled",true); }
+	{ return m_params.getBoolValue(YSTRING("enabled"),true); }
 
     /**
      * Set the account's startup login flag
@@ -3493,7 +3524,7 @@ public:
      * @return Account data directory
      */
     inline const String& dataDir() const
-	{ return m_params["datadirectory"]; }
+	{ return m_params[YSTRING("datadirectory")]; }
 
     /**
      * Set account directory in application data directory. Make sure it exists.
@@ -3789,7 +3820,7 @@ public:
      * @return True if the contact is locally saved
      */
     inline bool local(bool defVal = false) const
-	{ return m_params.getBoolValue("local",defVal); }
+	{ return m_params.getBoolValue(YSTRING("local"),defVal); }
 
     /**
      * Set contact locally saved flag
@@ -3804,7 +3835,7 @@ public:
      * @return True if the contact is saved on server
      */
     inline bool remote(bool defVal = false) const
-	{ return m_params.getBoolValue("remote",defVal); }
+	{ return m_params.getBoolValue(YSTRING("remote"),defVal); }
 
     /**
      * Set contact server saved flag

@@ -552,7 +552,7 @@ MsgHolder::MsgHolder(Message &msg)
 {
     // the address of this object should be unique
     char buf[64];
-    ::sprintf(buf,"%p.%ld",this,random());
+    ::sprintf(buf,"%p.%ld",this,Random::random());
     m_id = buf;
 }
 
@@ -1405,6 +1405,26 @@ bool ExtModReceiver::processLine(const char* line)
 		ok = val.null() && param;
 		val = param;
 	    }
+	    else if (id.startsWith("config.")) {
+		ok = val.null();
+		// keep the index in substr in sync with length of "config."
+		val = id.substr(7);
+		int sep = val.find('.');
+		if (sep > 0) {
+		    const NamedString* key = Engine::config().getKey(val.substr(0,sep).trimBlanks(),
+			val.substr(sep+1).trimBlanks());
+		    if (key)
+			val = *key;
+		    else {
+			val.clear();
+			ok = false;
+		    }
+		}
+		else {
+		    ok = (Engine::config().getSection(val) != 0);
+		    val.clear();
+		}
+	    }
 	    else if (id == "runid") {
 		ok = val.null();
 		val = Engine::runId();
@@ -1638,6 +1658,22 @@ bool ExtModCommand::complete(const String& partLine, const String& partWord, Str
 	for (const char** list = s_cmds; *list; list++)
 	    Module::itemComplete(rval,*list,partWord);
 	return true;
+    }
+    else if (partLine == "external restart" || partLine == "external stop") {
+	ObjList mod;
+	s_mutex.lock();
+	ObjList *l = &s_modules;
+	for (; l; l=l->next()) {
+	    ExtModReceiver *r = static_cast<ExtModReceiver *>(l->get());
+	    if (!r)
+		continue;
+	    if (mod.find(r->scriptFile()))
+		continue;
+	    mod.append(new String(r->scriptFile()));
+	}
+	s_mutex.unlock();
+	for (l = mod.skipNull(); l; l = l->skipNext())
+	    Module::itemComplete(rval,l->get()->toString(),partWord);
     }
     return false;
 }

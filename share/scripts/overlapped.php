@@ -18,6 +18,9 @@ require_once("libyate.php");
 /* Always the first action to do */
 Yate::Init();
 
+/* Comment next line to send output straight to log (no rmanager) */
+Yate::Output(true);
+
 /* Uncomment next line to get debugging messages */
 // Yate::Debug(true);
 
@@ -40,6 +43,10 @@ $final = false;
 $routeOnly = true;
 // Tone language from call.execute
 $lang = "";
+// Desired interdigit timer
+$interdigit = 0;
+// Actual timer value
+$timer = 0;
 
 function setState($newstate)
 {
@@ -118,6 +125,7 @@ function setState($newstate)
 
 function routeTo($num)
 {
+    global $final;
     global $ourcallid;
     global $executeParams;
     setState("routing");
@@ -125,7 +133,7 @@ function routeTo($num)
     $m->params = $executeParams;
     $m->params["id"] = $ourcallid;
     $m->params["called"] = $num;
-    $m->params["overlapped"] = "yes";
+    $m->params["overlapped"] = $final ? "no" : "yes";
     $m->Dispatch();
 }
 
@@ -152,11 +160,13 @@ function gotDTMF($dtmfs)
     global $collect;
     global $queue;
     global $final;
+    global $timer;
     global $routeOnly;
 
     Yate::Debug("Overlapped gotDTMF('$dtmfs') in state: '$state' collected: '$collect' queued: '$queue'");
 
     $queue .= $dtmfs;
+    $timer = 0;
     if ($state == "routing")
 	return;
     $route = false;
@@ -213,6 +223,30 @@ function gotDTMF($dtmfs)
     }
 }
 
+function timerTick()
+{
+    global $state;
+    global $final;
+    global $interdigit;
+    global $timer;
+    global $collect;
+    global $queue;
+
+    if ($interdigit <= 0)
+	return;
+
+    if ($timer++ >= $interdigit) {
+	$timer = 0;
+	Yate::Debug("Overlapped timeout in state: '$state' collected: '$collect' queued: '$queue'");
+	if ($state == "routing")
+	    return;
+	$interdigit = 0;
+	$final = true;
+	$collect .= $queue;
+	routeTo($collect);
+    }
+}
+
 function endRoute($callto,$ok,$err,$params)
 {
     global $partycallid;
@@ -263,7 +297,8 @@ function endRoute($callto,$ok,$err,$params)
 	    // Don't use setState: we don't want to change the prompt
 	    $state = "prompt";
 	// Check if got some other digits
-	gotDTMF("");
+	if ($queue != "")
+	    gotDTMF("");
     }
 }
 
@@ -284,6 +319,7 @@ while ($state != "") {
 		    $ev->params["targetid"] = $ourcallid;
 		    $num = $ev->GetValue("caller");
 		    $routeOnly = !Yate::Str2bool($ev->getValue("accept_call"));
+		    $interdigit = 1 * $ev->GetValue("interdigit",$interdigit);
 		    $autoanswer = false;
 		    $callednum = "";
 		    $lang = $ev->getValue("lang");
@@ -300,6 +336,8 @@ while ($state != "") {
 		    $ev->Acknowledge();
 		    // we already ACKed this message
 		    $ev = false;
+		    if ($interdigit > 0)
+			Yate::Install("engine.timer");
 		    if ($autoanswer) {
 			$m = new Yate("call.answered");
 			$m->params["id"] = $ourcallid;
@@ -325,7 +363,12 @@ while ($state != "") {
 		    if ($ev->GetValue("targetid") == $ourcallid ) {
 			gotDTMF($ev->GetValue("text"));
 			$ev->handled = true;
-		    }   
+		    }
+		    break;
+		case "engine.timer":
+		    $ev->Acknowledge();
+		    $ev = false;
+		    timerTick();
 		    break;
 	    }
 	    /* This is extremely important.

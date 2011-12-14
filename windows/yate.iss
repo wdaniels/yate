@@ -84,7 +84,8 @@ Source: "Release\server\analog.yate"; DestDir: "{app}\modules\server"; Flags: re
 Source: "Release\server\ysigchan.yate"; DestDir: "{app}\modules\server"; Flags: replacesameversion; Components: server\pstn
 Source: "Release\server\ciscosm.yate"; DestDir: "{app}\modules\server"; Flags: replacesameversion; Components: server\pstn
 Source: "Release\server\sigtransport.yate"; DestDir: "{app}\modules\server"; Flags: replacesameversion; Components: server\pstn
-Source: "Release\server\isupmangler.yate"; DestDir: "{app}\modules\server"; Flags: replacesameversion; Components: server\pstn
+Source: "Release\sig\isupmangler.yate"; DestDir: "{app}\modules\sig"; Flags: replacesameversion; Components: server\pstn
+Source: "Release\sig\ss7_lnp_ansi.yate"; DestDir: "{app}\modules\sig"; Flags: replacesameversion; Components: server\pstn
 Source: "Release\analyzer.yate"; DestDir: "{app}\modules"; Flags: replacesameversion; Components: server debug
 Source: "Release\server\callcounters.yate"; DestDir: "{app}\modules\server"; Flags: replacesameversion; Components: server
 Source: "Release\callfork.yate"; DestDir: "{app}\modules"; Flags: replacesameversion; Components: server
@@ -97,6 +98,7 @@ Source: "Release\dumbchan.yate"; DestDir: "{app}\modules"; Flags: replacesamever
 Source: "Release\extmodule.yate"; DestDir: "{app}\modules"; Flags: replacesameversion; Components: server
 Source: "Release\msgsniff.yate"; DestDir: "{app}\modules"; Flags: replacesameversion; Components: debug
 Source: "Release\regexroute.yate"; DestDir: "{app}\modules"; Flags: replacesameversion; Components: client server debug
+Source: "Release\enumroute.yate"; DestDir: "{app}\modules"; Flags: replacesameversion; Components: client server debug
 Source: "Release\server\regfile.yate"; DestDir: "{app}\modules\server"; Flags: replacesameversion; Components: server
 Source: "Release\rmanager.yate"; DestDir: "{app}\modules"; Flags: replacesameversion; Components: server debug
 Source: "Release\tonegen.yate"; DestDir: "{app}\modules"; Flags: replacesameversion; Components: driver\base
@@ -105,6 +107,7 @@ Source: "Release\wavefile.yate"; DestDir: "{app}\modules"; Components: driver\ba
 Source: "Release\server\yradius.yate"; DestDir: "{app}\modules\server"; Flags: replacesameversion; Components: server
 Source: "Release\server\register.yate"; DestDir: "{app}\modules\server"; Flags: replacesameversion; Components: server
 Source: "Release\server\dbpbx.yate"; DestDir: "{app}\modules\server"; Flags: replacesameversion; Components: server
+Source: "Release\server\dbwave.yate"; DestDir: "{app}\modules\server"; Flags: replacesameversion; Components: server
 Source: "Release\pbx.yate"; DestDir: "{app}\modules"; Flags: replacesameversion; Components: server
 Source: "Release\server\pbxassist.yate"; DestDir: "{app}\modules\server"; Flags: replacesameversion; Components: server
 Source: "Release\server\park.yate"; DestDir: "{app}\modules\server"; Flags: replacesameversion; Components: server
@@ -112,6 +115,10 @@ Source: "Release\server\queues.yate"; DestDir: "{app}\modules\server"; Flags: re
 Source: "Release\server\queuesnotify.yate"; DestDir: "{app}\modules\server"; Flags: replacesameversion; Components: server
 Source: "Release\server\lateroute.yate"; DestDir: "{app}\modules\server"; Flags: replacesameversion; Components: server
 Source: "Release\server\sipfeatures.yate"; DestDir: "{app}\modules\server"; Flags: replacesameversion; Components: server
+Source: "Release\server\cache.yate"; DestDir: "{app}\modules\server"; Flags: replacesameversion; Components: server
+Source: "Release\server\subscription.yate"; DestDir: "{app}\modules\server"; Flags: replacesameversion; Components: server
+Source: "Release\server\presence.yate"; DestDir: "{app}\modules\server"; Flags: replacesameversion; Components: server
+Source: "Release\server\users.yate"; DestDir: "{app}\modules\server"; Flags: replacesameversion; Components: server
 Source: "Release\server\cpuload.yate"; DestDir: "{app}\modules\server"; Flags: replacesameversion; Components: server\monitor
 Source: "Release\server\ccongestion.yate"; DestDir: "{app}\modules\server"; Flags: replacesameversion; Components: server\monitor
 Source: "Release\server\monitoring.yate"; DestDir: "{app}\modules\server"; Flags: replacesameversion; Components: server\monitor
@@ -170,6 +177,7 @@ Source: "..\conf.d\*.conf.sample"; DestDir: "{app}\conf.d"
 
 Source: "..\share\help\*.yhlp"; DestDir: "{app}\share\help"; Components: client
 Source: "..\share\sounds\*.wav"; DestDir: "{app}\share\sounds"; Components: client
+Source: "..\share\sounds\*.au"; DestDir: "{app}\share\sounds"; Components: client
 Source: "..\conf.d\providers.conf.default"; DestName: "providers.conf"; DestDir: "{app}\conf.d"; Components: client
 Source: "..\share\skins\default\qt4client.rc"; DestDir: "{app}\share\skins\default"; Components: client\qt
 Source: "..\share\skins\default\*.ui"; DestDir: "{app}\share\skins\default"; Components: client\qt

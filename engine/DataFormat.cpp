@@ -467,7 +467,7 @@ void DataConsumer::destroyed()
 
 void* DataConsumer::getObject(const String& name) const
 {
-    if (name == "DataConsumer")
+    if (name == YSTRING("DataConsumer"))
 	return const_cast<DataConsumer*>(this);
     return DataNode::getObject(name);
 }
@@ -692,7 +692,7 @@ void DataSource::synchronize(unsigned long tStamp)
 
 void* DataSource::getObject(const String& name) const
 {
-    if (name == "DataSource")
+    if (name == YSTRING("DataSource"))
 	return const_cast<DataSource*>(this);
     return DataNode::getObject(name);
 }
@@ -725,7 +725,7 @@ void DataEndpoint::destroyed()
 
 void* DataEndpoint::getObject(const String& name) const
 {
-    if (name == "DataEndpoint")
+    if (name == YSTRING("DataEndpoint"))
 	return const_cast<DataEndpoint*>(this);
     return RefObject::getObject(name);
 }
@@ -899,8 +899,23 @@ void DataEndpoint::setConsumer(DataConsumer* consumer)
     m_consumer = consumer;
     if (source && temp)
 	DataTranslator::detachChain(source,temp);
-    if (temp)
+    if (temp) {
+	s_consSrcMutex.lock();
+	RefPointer<DataSource> src = temp->getConnSource();
+	s_consSrcMutex.unlock();
+	if (src) {
+	    src->detach(temp);
+	    src = 0;
+	}
+	s_consSrcMutex.lock();
+	src = temp->getOverSource();
+	s_consSrcMutex.unlock();
+	if (src) {
+	    src->detach(temp);
+	    src = 0;
+	}
 	temp->attached(false);
+    }
     if (consumer)
 	consumer->attached(true);
     lock.drop();
@@ -1137,7 +1152,7 @@ DataTranslator::~DataTranslator()
 
 void* DataTranslator::getObject(const String& name) const
 {
-    if (name == "DataTranslator")
+    if (name == YSTRING("DataTranslator"))
 	return const_cast<DataTranslator*>(this);
     return DataConsumer::getObject(name);
 }
@@ -1741,7 +1756,8 @@ DataTranslator* ChainedFactory::create(const DataFormat& sFormat, const DataForm
 	trans1->deref();
     }
     else
-	trans->destruct();
+	// trans may be a chain itself so clear from first translator
+	trans->getFirstTranslator()->destruct();
     return trans2;
 }
 

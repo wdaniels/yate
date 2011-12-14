@@ -176,15 +176,18 @@ public:
 	const char* from, const char* to);
     // Load the entity caps file
     void load();
+    // Set caps file. Save it if changed
+    void setFile(const char* file);
 protected:
     inline void getEntityCapsFile(String& file) {
-	    file = Engine::configPath();
-	    if (!file.endsWith(Engine::pathSeparator()))
-		file << Engine::pathSeparator();
-	    file << "jabberentitycaps.xml";
+	    Lock mylock(this);
+	    file = m_file;
 	}
     // Notify changes and save the entity caps file
     virtual void capsAdded(JBEntityCaps* caps);
+    // Save the file
+    void save();
+    String m_file;
 };
 
 /*
@@ -362,7 +365,7 @@ public:
 private:
     // Notify an incoming s2s stream about a dialback verify response
     void notifyDbVerifyResult(const JabberID& local, const JabberID& remote,
-	const String& id, XMPPError::Type rsp);
+	const String& id, XMPPError::Type rsp, bool authFail);
     // Find a configured or dynamic domain
     inline ObjList* findDomain(const String& domain, bool cfg)
 	{ return cfg ? m_domains.find(domain) : m_dynamicDomains.find(domain); }
@@ -487,6 +490,8 @@ public:
 protected:
     // Check accepted and returned value. Calls stream's authenticated() method
     virtual void dispatched(bool accepted);
+    // Enqueue a fail message
+    void authFailed();
 
     String m_stream;
     JBStream::Type m_streamType;
@@ -977,6 +982,25 @@ void YJBEntityCapsList::load()
     loadXmlDoc(file,s_jabber);
 }
 
+// Set caps file
+void YJBEntityCapsList::setFile(const char* file)
+{
+    Lock mylock(this);
+    String old = m_file;
+    m_file = file;
+    if (!m_file) {
+	m_file = Engine::configPath();
+	if (!m_file.endsWith(Engine::pathSeparator()))
+	    m_file << Engine::pathSeparator();
+	m_file << "jabberentitycaps.xml";
+    }
+    Engine::self()->runParams().replaceParams(m_file);
+    bool changed = m_enable && old && m_file && old != m_file;
+    mylock.drop();
+    if (changed)
+	save();
+}
+
 // Notify changes and save the entity caps file
 void YJBEntityCapsList::capsAdded(JBEntityCaps* caps)
 {
@@ -991,6 +1015,12 @@ void YJBEntityCapsList::capsAdded(JBEntityCaps* caps)
     addCaps(*m,*caps);
     Engine::enqueue(m);
     // Save the file
+    save();
+}
+
+// Save the file
+void YJBEntityCapsList::save()
+{
     String file;
     getEntityCapsFile(file);
     saveXmlDoc(file,s_jabber);
@@ -1095,7 +1125,7 @@ void YJBEngine::initialize(const NamedList* params, bool first)
 	    MD5 md5;
 	    md5 << String((unsigned int)Time::msecNow());
 	    md5 << String(Engine::runId());
-	    md5 << String((int)::random());
+	    md5 << String((int)Random::random());
 	    m_dialbackSecret = md5.hexDigest();
 	}
     }
@@ -1989,6 +2019,7 @@ void YJBEngine::processStartIn(JBEvent* ev)
     XMPPFeature* reg = 0;
     XMPPFeature* auth = 0;
     XMPPFeature* bind = 0;
+    XMPPFeature* sess = 0;
     XmlElement* caps = 0;
     bool setComp = false;
     bool c2s = ev->stream()->type() == JBStream::c2s;
@@ -2022,8 +2053,10 @@ void YJBEngine::processStartIn(JBEvent* ev)
 		auth = new XMPPFeatureSasl(mech,true);
 	    }
 	    // TLS and/or SASL are missing or not required: add bind
-	    if (!(auth && auth->required()))
+	    if (!(auth && auth->required())) {
 		bind = new XMPPFeature(XmlTag::Bind,XMPPNamespace::Bind,true);
+		sess = new XMPPFeature(XmlTag::Session,XMPPNamespace::Session,false);
+	    }
 	}
 	else if (addReg)
 	    // Stream not secured, TLS not required: add register
@@ -2039,6 +2072,7 @@ void YJBEngine::processStartIn(JBEvent* ev)
     if (setComp)
 	addCompressFeature(ev->stream(),features);
     features.add(bind);
+    features.add(sess);
     ev->releaseStream();
     ev->stream()->start(&features,caps);
 }
@@ -2296,7 +2330,7 @@ void YJBEngine::processStreamEvent(JBEvent* ev)
 		// See XEP 0220 2.4
 		JabberID remote;
 		s2s->remote(remote);
-		notifyDbVerifyResult(local,remote,db->name(),XMPPError::RemoteTimeout);
+		notifyDbVerifyResult(local,remote,db->name(),XMPPError::RemoteTimeout,false);
 		TelEngine::destruct(db);
 	    }
 	}
@@ -2408,7 +2442,7 @@ void YJBEngine::processDbVerify(JBEvent* ev)
 	// Adjust the response. See XEP 0220 2.4
 	if (r == XMPPError::ItemNotFound || r == XMPPError::HostUnknown)
 	    r = XMPPError::NoRemote;
-	notifyDbVerifyResult(ev->to(),ev->from(),id,(XMPPError::Type)r);
+	notifyDbVerifyResult(ev->to(),ev->from(),id,(XMPPError::Type)r,true);
     }
     TelEngine::destruct(db);
     // Terminate dialback only streams
@@ -2992,14 +3026,28 @@ bool YJBEngine::sendCluster(XmlElement* xml, const String& node)
 
 // Notify an incoming s2s stream about a dialback verify response
 void YJBEngine::notifyDbVerifyResult(const JabberID& local, const JabberID& remote,
-    const String& id, XMPPError::Type rsp)
+    const String& id, XMPPError::Type rsp, bool authFail)
 {
     if (!id)
 	return;
     // Notify the incoming stream
     JBServerStream* notify = findServerStream(local,remote,false,false);
-    if (notify && notify->isId(id))
+    if (notify && notify->isId(id)) {
+	if (authFail && rsp != XMPPError::NoError) {
+	    Message* m = new Message("user.authfail");
+	    __plugin.complete(*m);
+	    SocketAddr addr;
+	    if (notify->remoteAddr(addr)) {
+		m->addParam("ip_host",addr.host());
+		m->addParam("ip_port",String(addr.port()));
+	    }
+	    m->addParam("streamtype",notify->typeName());
+	    m->addParam("local_domain",local);
+	    m->addParam("remote_domain",remote);
+	    Engine::enqueue(m);
+	}
 	notify->sendDbResult(local,remote,rsp);
+    }
     else
 	Debug(this,DebugNote,
 	    "No incoming s2s stream local=%s remote=%s id='%s' to notify dialback verify result",
@@ -3278,7 +3326,8 @@ void JBPendingWorker::processChat(JBPendingJob& job)
     Message m("msg.route");
     while (true) {
 	__plugin.complete(m);
-	m.addParam("type",ev->stanzaType());
+	const char* tStr = ev->stanzaType();
+	m.addParam("type",tStr ? tStr : XMPPUtils::msgText(XMPPUtils::Normal));
 	addValidParam(m,"id",ev->id());
 	m.addParam("caller",ev->from().bare());
 	addValidParam(m,"called",ev->to().bare());
@@ -3642,8 +3691,10 @@ void UserAuthMessage::dispatched(bool accepted)
 		addCompressFeature(stream,features);
 		stream->start(&features);
 	    }
-	    else
+	    else {
 		stream->terminate(-1,true,0,XMPPError::NotAuthorized);
+		authFailed();
+	    }
 	    TelEngine::destruct(stream);
 	    return;
 	}
@@ -3700,6 +3751,17 @@ void UserAuthMessage::dispatched(bool accepted)
 	stream->authenticated(ok,rspValue,XMPPError::NotAuthorized,username.node(),
 	    getValue("requestid"),getValue("instance"));
     TelEngine::destruct(stream);
+    if (!ok)
+	authFailed();
+}
+
+// Enqueue a fail message
+void UserAuthMessage::authFailed()
+{
+    Message* fail = new Message(*this);
+    *fail = "user.authfail";
+    fail->retValue().clear();
+    Engine::enqueue(fail);
 }
 
 
@@ -3876,6 +3938,7 @@ void JBModule::initialize()
     Output("Initializing module Jabber Server");
     Configuration cfg(Engine::configFile("jabberserver"));
 
+    s_entityCaps.setFile(cfg.getValue("general","entitycaps_file"));
     if (!m_init) {
 	// Init some globals
 	s_clusterControlSkip.append(new String("targetid"));
@@ -4148,8 +4211,10 @@ bool JBModule::commandComplete(Message& msg, const String& partLine,
 	partLine.c_str(),partWord.c_str());
 
     // No line or 'help': complete module name
-    if (partLine.null() || partLine == "help")
-	return Module::itemComplete(msg.retValue(),name(),partWord);
+    if (partLine.null() || partLine == "help") {
+	Module::itemComplete(msg.retValue(),name(),partWord);
+	return Module::commandComplete(msg,partLine,partWord);
+    }
     // Line is module name: complete module commands
     if (partLine == name()) {
 	for (const String* list = s_cmds; list->length(); list++)

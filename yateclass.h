@@ -29,6 +29,7 @@
 #error C++ is required
 #endif
 
+#include <limits.h>
 #include <sys/types.h>
 #include <stddef.h>
 #include <unistd.h>
@@ -185,10 +186,6 @@ typedef int HANDLE;
 #ifdef _WINDOWS
 #undef RAND_MAX
 #define RAND_MAX 2147483647
-extern "C" {
-YATE_API long int random();
-YATE_API void srandom(unsigned int seed);
-}
 #endif
 
 /**
@@ -200,6 +197,12 @@ namespace TelEngine {
 #define FORMAT_CHECK(f) __attribute__((format(printf,(f),(f)+1)))
 #else
 #define FORMAT_CHECK(f)
+#endif
+
+#ifdef HAVE_BLOCK_RETURN
+#define YSTRING(s) (*({static const String str(s);&str;}))
+#else
+#define YSTRING(s) (s)
 #endif
 
 /**
@@ -503,6 +506,7 @@ public:
 	Relative,  // from program start
 	Absolute,  // from EPOCH (1-1-1970)
 	Textual,   // absolute GMT in YYYYMMDDhhmmss.uuuuuu format
+	TextLocal, // local time in YYYYMMDDhhmmss.uuuuuu format
     };
 
     /**
@@ -545,10 +549,24 @@ public:
     static void enableOutput(bool enable = true, bool colorize = false);
 
     /**
+     * Retrieve the format of timestamps
+     * @return The current formatting type for timestamps
+     */
+    static Formatting getFormatting();
+
+    /**
      * Set the format of timestamps on output messages and set the time start reference
      * @param format Desired timestamp formatting
      */
     static void setFormatting(Formatting format);
+
+    /**
+     * Fill a buffer with a current timestamp prefix
+     * @param buf Buffer to fill, must be at least 24 characters long
+     * @param format Desired timestamp formatting
+     * @return Length of the prefix written in buffer excluding final NUL
+     */
+    static unsigned int formatTime(char* buf, Formatting format = getFormatting());
 
 private:
     const char* m_name;
@@ -574,6 +592,13 @@ class String;
 class Mutex;
 
 #if 0 /* for documentation generator */
+/**
+ * Macro to create a local static String if supported by compiler, use with caution
+ * @param string Literal constant string
+ * @return A const String& if supported, literal string if not supported
+ */
+constant YSTRING(const char* string);
+
 /**
  * Macro to create a GenObject class from a base class and implement @ref GenObject::getObject
  * @param type Class that is declared
@@ -639,17 +664,17 @@ void YNOCOPY(class type);
 
 #define YCLASS(type,base) \
 public: virtual void* getObject(const String& name) const \
-{ return (name == #type) ? const_cast<type*>(this) : base::getObject(name); }
+{ return (name == YSTRING(#type)) ? const_cast<type*>(this) : base::getObject(name); }
 
 #define YCLASS2(type,base1,base2) \
 public: virtual void* getObject(const String& name) const \
-{ if (name == #type) return const_cast<type*>(this); \
+{ if (name == YSTRING(#type)) return const_cast<type*>(this); \
   void* tmp = base1::getObject(name); \
   return tmp ? tmp : base2::getObject(name); }
 
 #define YCLASS3(type,base1,base2,base3) \
 public: virtual void* getObject(const String& name) const \
-{ if (name == #type) return const_cast<type*>(this); \
+{ if (name == YSTRING(#type)) return const_cast<type*>(this); \
   void* tmp = base1::getObject(name); \
   if (tmp) return tmp; \
   tmp = base2::getObject(name); \
@@ -657,23 +682,23 @@ public: virtual void* getObject(const String& name) const \
 
 #define YCLASSIMP(type,base) \
 void* type::getObject(const String& name) const \
-{ return (name == #type) ? const_cast<type*>(this) : base::getObject(name); }
+{ return (name == YSTRING(#type)) ? const_cast<type*>(this) : base::getObject(name); }
 
 #define YCLASSIMP2(type,base1,base2) \
 void* type::getObject(const String& name) const \
-{ if (name == #type) return const_cast<type*>(this); \
+{ if (name == YSTRING(#type)) return const_cast<type*>(this); \
   void* tmp = base1::getObject(name); \
   return tmp ? tmp : base2::getObject(name); }
 
 #define YCLASSIMP3(type,base1,base2,base3) \
 void* type::getObject(const String& name) const \
-{ if (name == #type) return const_cast<type*>(this); \
+{ if (name == YSTRING(#type)) return const_cast<type*>(this); \
   void* tmp = base1::getObject(name); \
   if (tmp) return tmp; \
   tmp = base2::getObject(name); \
   return tmp ? tmp : base3::getObject(name); }
 
-#define YOBJECT(type,pntr) (static_cast<type*>(GenObject::getObject(#type,pntr)))
+#define YOBJECT(type,pntr) (static_cast<type*>(GenObject::getObject(YSTRING(#type),pntr)))
 
 #define YNOCOPY(type) private: \
 type(const type&); \
@@ -803,11 +828,11 @@ public:
     virtual void destruct();
 
     /**
-     * Retrieve the mutex that protects ref() and deref() for this object
-     * @return Reference to the mutex used for counter operations
+     * Check if reference counter manipulations are efficient on this platform.
+     * If platform does not support atomic operations a mutex pool is used.
+     * @return True if refcount uses atomic integer operations
      */
-    inline Mutex& refMutex()
-	{ return *m_mutex; }
+    static bool efficientIncDec();
 
 protected:
     /**
@@ -816,23 +841,6 @@ protected:
      * The default behaviour is to delete the object.
      */
     virtual void zeroRefs();
-
-    /**
-     * This method is called when the reference count reaches zero just before
-     *  calling zeroRefs() with the non-recursive mutex still locked.
-     * Extra care must be taken to prevent deadlocks, normally the code should
-     *  only change some variables and return.
-     * The default implementation just returns true.
-     * @return True to call zeroRefs() after releasing the mutex
-     */
-    virtual bool zeroRefsTest();
-
-    /**
-     * Increments the reference counter if not already zero without locking
-     *  the mutex. The caller must make sure to hold the refMutex() locked.
-     * @return True if the object was successfully referenced
-     */
-    bool refInternal();
 
     /**
      * Bring the object back alive by setting the reference counter to one.
@@ -1339,6 +1347,19 @@ public:
     inline int getColumns() const
 	{ return m_columns; }
 
+    /**
+     * Retrieve a column.
+     * Note: Use the returned list only to get or set data.
+     *  List items must not be removed or appended
+     * @param column Column to retrieve
+     * @return Pointer to column list, NULL for out of bound indexes
+     */
+    inline ObjList* getColumn(int column) const {
+	    if (column >= 0 || column < m_columns)
+		return static_cast<ObjList*>(m_obj[column]);
+	    return 0;
+	}
+
 private:
     int m_rows;
     int m_columns;
@@ -1551,9 +1572,14 @@ public:
      * Convert the string to an integer value.
      * @param defvalue Default to return if the string is not a number
      * @param base Numeration base, 0 to autodetect
+     * @param minvalue Minimum value allowed
+     * @param maxvalue Maximum value allowed
+     * @param clamp Control the out of bound values: true to adjust to the nearest
+     *  bound, false to return the default value
      * @return The integer interpretation or defvalue.
      */
-    int toInteger(int defvalue = 0, int base = 0) const;
+    int toInteger(int defvalue = 0, int base = 0, int minvalue = INT_MIN,
+	int maxvalue = INT_MAX, bool clamp = true) const;
 
     /**
      * Convert the string to an integer value looking up first a token table.
@@ -2792,6 +2818,57 @@ private:
 };
 
 /**
+ * Implementation of a system independent pseudo random number generator
+ * @short Pseudo random number generator
+ */
+class YATE_API Random
+{
+public:
+    /**
+     * Constructor
+     * @param seed Number to use as initial sequence seed
+     */
+    inline Random(u_int32_t seed = Time::now() & 0xffffffff)
+	: m_random(seed)
+	{ }
+
+    /**
+     * Get the latest random number generated
+     * @return Last random number generated
+     */
+    inline u_int32_t get() const
+	{ return m_random; }
+
+    /**
+     * Set the pseudo random generator to a known state
+     * @param seed Number to set as current state
+     */
+    inline void set(u_int32_t seed)
+	{ m_random = seed; }
+
+    /**
+     * Advance the pseudo random sequence and return new value
+     * @return Next random number in sequence
+     */
+    u_int32_t next();
+
+    /**
+     * Thread safe (and shared) replacement for library ::random()
+     * @return Next random number in the global sequence
+     */
+    static long int random();
+
+    /**
+     * Thread safe (and shared) replacement for library ::srandom()
+     * @param seed Number to set as seed in the global sequence
+     */
+    static void srandom(unsigned int seed);
+
+private:
+    u_int32_t m_random;
+};
+
+/**
  * The DataBlock holds a data buffer with no specific formatting.
  * @short A class that holds just a block of raw data
  */
@@ -3526,9 +3603,14 @@ public:
      * Retrieve the numeric value of a parameter.
      * @param name Name of parameter to locate
      * @param defvalue Default value to return if not found
+     * @param minvalue Minimum value allowed for the parameter
+     * @param maxvalue Maximum value allowed for the parameter
+     * @param clamp Control the out of bound values: true to adjust to the nearest
+     *  bound, false to return the default value
      * @return The number contained in the named parameter or the default
      */
-    int getIntValue(const String& name, int defvalue = 0) const;
+    int getIntValue(const String& name, int defvalue = 0, int minvalue = INT_MIN,
+	int maxvalue = INT_MAX, bool clamp = true) const;
 
     /**
      * Retrieve the numeric value of a parameter trying first a table lookup.
@@ -3781,6 +3863,7 @@ class ExpOperation;
  */
 class YATE_API ExpExtender : public RefObject
 {
+    YCLASS(ExpExtender,RefObject)
 public:
     /**
      * Try to evaluate a single function
@@ -3790,7 +3873,7 @@ public:
      * @param oper Function to evaluate
      * @return True if evaluation succeeded
      */
-    virtual bool runFunction(ExpEvaluator* eval, ObjList& stack, const ExpOperation& oper);
+    virtual bool runFunction(const ExpEvaluator* eval, ObjList& stack, const ExpOperation& oper);
 
     /**
      * Try to evaluate a single field
@@ -3799,7 +3882,7 @@ public:
      * @param oper Field to evaluate
      * @return True if evaluation succeeded
      */
-    virtual bool runField(ExpEvaluator* eval, ObjList& stack, const ExpOperation& oper);
+    virtual bool runField(const ExpEvaluator* eval, ObjList& stack, const ExpOperation& oper);
 };
 
 /**
@@ -3912,14 +3995,14 @@ public:
      * @param results List to fill with results row
      * @return True if expression evaluation succeeded, false on failure
      */
-    bool evaluate(ObjList* results);
+    bool evaluate(ObjList* results) const;
 
     /**
      * Evaluate the expression, return computed results
      * @param results List to fill with results row
      * @return True if expression evaluation succeeded, false on failure
      */
-    inline bool evaluate(ObjList& results)
+    inline bool evaluate(ObjList& results) const
 	{ return evaluate(&results); }
 
     /**
@@ -3929,7 +4012,7 @@ public:
      * @param prefix Prefix to prepend to parameter names
      * @return Number of result columns, -1 on failure
      */
-    int evaluate(NamedList& results, unsigned int index = 0, const char* prefix = 0);
+    int evaluate(NamedList& results, unsigned int index = 0, const char* prefix = 0) const;
 
     /**
      * Evaluate the expression, return computed results
@@ -3937,7 +4020,7 @@ public:
      * @param index Index of result row, zero to just set column headers
      * @return Number of result columns, -1 on failure
      */
-    int evaluate(Array& results, unsigned int index);
+    int evaluate(Array& results, unsigned int index) const;
 
     /**
      * Simplify the expression, performs constant folding
@@ -3963,7 +4046,7 @@ public:
      * Retrieve the internally used operator dictionary
      * @return Pointer to operators dictionary in use
      */
-    inline const TokenDict* operators()
+    inline const TokenDict* operators() const
 	{ return m_operators; }
 
     /**
@@ -3978,6 +4061,13 @@ public:
      * @param ext Pointer to the extender to use, NULL to remove current
      */
     void extender(ExpExtender* ext);
+
+    /**
+     * Pops an operand off an evaluation stack
+     * @param stack Evaluation stack to remove the operand from
+     * @return Operator removed from stack, NULL if stack underflow
+     */
+    static ExpOperation* popOne(ObjList& stack);
 
 protected:
     /**
@@ -4000,7 +4090,7 @@ protected:
      * @param text Optional text that caused the error
      * @return Always returns false
      */
-    bool gotError(const char* error = 0, const char* text = 0);
+    bool gotError(const char* error = 0, const char* text = 0) const;
 
     /**
      * Runs the parser and compiler for one (sub)expression
@@ -4100,13 +4190,6 @@ protected:
     void addOpcode(Opcode oper, const String& name, long int value = 0);
 
     /**
-     * Pops an operand off the evaluation stack
-     * @param stack Evaluation stack to remove the operand from
-     * @return Operator removed from stack, NULL if stack underflow
-     */
-    ExpOperation* popOne(ObjList& stack);
-
-    /**
      * Try to apply simplification to the expression
      * @return True if the expression was simplified
      */
@@ -4117,7 +4200,7 @@ protected:
      * @param stack Evaluation stack in use, results are left on stack
      * @return True if evaluation succeeded
      */
-    virtual bool runEvaluate(ObjList& stack);
+    virtual bool runEvaluate(ObjList& stack) const;
 
     /**
      * Try to evaluate a single operation
@@ -4126,7 +4209,7 @@ protected:
      * @param oper Operation to execute
      * @return True if evaluation succeeded
      */
-    virtual bool runOperation(ObjList& stack, const ExpOperation& oper);
+    virtual bool runOperation(ObjList& stack, const ExpOperation& oper) const;
 
     /**
      * Try to evaluate a single function
@@ -4135,7 +4218,7 @@ protected:
      * @param oper Function to evaluate
      * @return True if evaluation succeeded
      */
-    virtual bool runFunction(ObjList& stack, const ExpOperation& oper);
+    virtual bool runFunction(ObjList& stack, const ExpOperation& oper) const;
 
     /**
      * Try to evaluate a single field
@@ -4143,7 +4226,7 @@ protected:
      * @param oper Field to evaluate
      * @return True if evaluation succeeded
      */
-    virtual bool runField(ObjList& stack, const ExpOperation& oper);
+    virtual bool runField(ObjList& stack, const ExpOperation& oper) const;
 
     /**
      * Internally used operator dictionary
@@ -4166,6 +4249,7 @@ private:
 class YATE_API ExpOperation : public NamedString
 {
     friend class ExpEvaluator;
+    YCLASS(ExpOperation,NamedString)
 public:
     /**
      * Copy constructor
@@ -4471,7 +4555,7 @@ private:
  *  larger set of objects needing lock.
  * @short A Mutex pool
  */
-class MutexPool
+class YATE_API MutexPool
 {
 public:
     /**
@@ -5842,6 +5926,13 @@ public:
     virtual bool getOption(int level, int name, void* buffer, socklen_t* length);
 
     /**
+     * Set specific socket parameters.
+     * @param params List of parameters
+     */
+    virtual bool setParams(const NamedList& params)
+	{ return false; }
+
+    /**
      * Set the Type of Service on the IP level of this socket
      * @param tos New TOS bits to set
      * @return True if operation was successfull, false if an error occured
@@ -6273,6 +6364,256 @@ public:
      * @return True if set successfully
      */
     virtual bool setPayload(u_int32_t payload) = 0;
+};
+
+/**
+ * This class holds a DNS (resolver) record
+ * @short A DNS record
+ */
+class YATE_API DnsRecord : public GenObject
+{
+    YCLASS(DnsRecord,GenObject)
+    YNOCOPY(DnsRecord);
+public:
+    /**
+     * Build a DNS record
+     * @param order Record order (priority)
+     * @param pref Record preference
+     */
+    inline DnsRecord(int order, int pref)
+	: m_order(order), m_pref(pref)
+	{}
+
+    /**
+     * Default constructor
+     */
+    inline DnsRecord()
+	: m_order(0), m_pref(0)
+	{}
+
+    /**
+     * Retrieve the record order
+     * @return Record order
+     */
+    inline int order() const
+	{ return m_order; }
+
+    /**
+     * Retrieve the record preference
+     * @return Record preference
+     */
+    inline int pref() const
+	{ return m_pref; }
+
+    /**
+     * Dump a record for debug purposes
+     * @param buf Destination buffer
+     * @param sep Fields separator
+     */
+    virtual void dump(String& buf, const char* sep = " ");
+
+    /**
+     * Insert a DnsRecord into a list in the proper location given by order and preference
+     * @param list Destination list
+     * @param rec The item to insert
+     * @param ascPref Order preference ascending
+     * @return True on success, false on failure (already in the list)
+     */
+    static bool insert(ObjList& list, DnsRecord* rec, bool ascPref);
+
+protected:
+    int m_order;
+    int m_pref;
+};
+
+/**
+ * This class holds a SRV (Service Location) record
+ * @short A SRV record
+ */
+class YATE_API SrvRecord : public DnsRecord
+{
+    YCLASS(SrvRecord,DnsRecord)
+    YNOCOPY(SrvRecord);
+public:
+    /**
+     * Build a SRV record
+     * @param prio Record priority (order)
+     * @param weight Record weight (preference)
+     * @param addr Record address
+     * @param port Record port
+     */
+    inline SrvRecord(int prio, int weight, const char* addr, int port)
+	: DnsRecord(prio,weight), m_address(addr), m_port(port)
+	{}
+
+    /**
+     * Retrieve the record address
+     * @return Record address
+     */
+    inline const String& address() const
+	{ return m_address; }
+
+    /**
+     * Retrieve the record port
+     * @return Record port
+     */
+    inline int port() const
+	{ return m_port; }
+
+    /**
+     * Dump this record for debug purposes
+     * @param buf Destination buffer
+     * @param sep Fields separator
+     */
+    virtual void dump(String& buf, const char* sep = " ");
+
+    /**
+     * Copy a SrvRecord list into another one
+     * @param dest Destination list
+     * @param src Source list
+     */
+    static void copy(ObjList& dest, const ObjList& src);
+
+protected:
+    String m_address;
+    int m_port;
+
+private:
+    SrvRecord() {}                       // No default contructor
+};
+
+/**
+ * This class holds a NAPTR (Naming Authority Pointer) record
+ * @short A NAPTR record
+ */
+class YATE_API NaptrRecord : public DnsRecord
+{
+    YCLASS(NaptrRecord,DnsRecord)
+    YNOCOPY(NaptrRecord);
+public:
+    /**
+     * Build a NAPTR record
+     * @param ord Record order
+     * @param pref Record preference
+     * @param flags Interpretation flags
+     * @param serv Available services
+     * @param regexp Substitution expression
+     * @param next Next name to query
+     */
+    NaptrRecord(int ord, int pref, const char* flags, const char* serv,
+	const char* regexp, const char* next);
+
+    /**
+     * Replace the enclosed template in a given string if matching
+     *  the substitution expression
+     * @param str String to replace
+     * @return True on success
+     */
+    bool replace(String& str);
+
+    /**
+     * Dump this record for debug purposes
+     * @param buf Destination buffer
+     * @param sep Fields separator
+     */
+    virtual void dump(String& buf, const char* sep = " ");
+
+    /**
+     * Retrieve record interpretation flags
+     * @return Record interpretation flags
+     */
+    inline const String& flags() const
+	{ return m_flags; }
+
+    /**
+     * Retrieve available services
+     * @return Available services
+     */
+    inline const String& serv() const
+	{ return m_service; }
+
+    /**
+     * Retrieve the next domain name to query
+     * @return The next domain to query
+     */
+    inline const String& nextName() const
+	{ return m_next; }
+
+protected:
+    String m_flags;
+    String m_service;
+    Regexp m_regmatch;
+    String m_template;
+    String m_next;
+
+private:
+    NaptrRecord() {}                     // No default contructor
+};
+
+/**
+ * This class offers DNS query services
+ * @short DNS services
+ */
+class YATE_API Resolver
+{
+public:
+    /**
+     * Resolver handled types
+     */
+    enum Type {
+	Unknown,
+	Srv,                             // SRV (Service Location)
+	Naptr,                           // NAPTR (Naming Authority Pointer)
+    };
+
+    /**
+     * Runtime check for resolver availability
+     * @param type Optional type to check. Set it to Unknown (default) to check
+     *  general resolver availability
+     * @return True if the resolver is available on current platform
+     */
+    static bool available(Type type = Unknown);
+
+    /**
+     * Initialize the resolver in the current thread
+     * @param timeout Query timeout. Negative to use default
+     * @param retries The number of query retries. Negative to use default
+     * @return True on success
+     */
+    static bool init(int timeout = -1, int retries = -1);
+
+    /**
+     * Make a query
+     * @param type Query type as enumeration
+     * @param dname Domain to query
+     * @param result List of resulting record items
+     * @param error Optional string to be filled with error string
+     * @return 0 on success, error code otherwise (h_errno value on Linux)
+     */
+    static int query(Type type, const char* dname, ObjList& result, String* error = 0);
+
+    /**
+     * Make a SRV (Service Location) query
+     * @param dname Domain to query
+     * @param result List of resulting SrvRecord items
+     * @param error Optional string to be filled with error string
+     * @return 0 on success, error code otherwise (h_errno value on Linux)
+     */
+    static int srvQuery(const char* dname, ObjList& result, String* error = 0);
+
+    /**
+     * Make a NAPTR (Naming Authority Pointer) query
+     * @param dname Domain to query
+     * @param result List of resulting NaptrRecord items
+     * @param error Optional string to be filled with error string
+     * @return 0 on success, error code otherwise (h_errno value on Linux)
+     */
+    static int naptrQuery(const char* dname, ObjList& result, String* error = 0);
+
+    /**
+     * Resolver type names
+     */
+    static const TokenDict s_types[];
 };
 
 /**

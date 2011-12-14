@@ -75,13 +75,13 @@ SignallingCallControl::SignallingCallControl(const NamedList& params,
       m_exiting(false)
 {
     // Controller location
-    m_location = params.getValue("location");
+    m_location = params.getValue(YSTRING("location"));
     // Strategy
-    const char* strategy = params.getValue("strategy","increment");
+    const char* strategy = params.getValue(YSTRING("strategy"),"increment");
     m_strategy = SignallingCircuitGroup::str2strategy(strategy);
     String restrict;
     if (m_strategy != SignallingCircuitGroup::Random)
-	restrict = params.getValue("strategy-restrict");
+	restrict = params.getValue(YSTRING("strategy-restrict"));
     if (!restrict.null()) {
 	if (restrict == "odd")
 	    m_strategy |= SignallingCircuitGroup::OnlyOdd;
@@ -94,14 +94,14 @@ SignallingCallControl::SignallingCallControl(const NamedList& params,
     }
 
     // Message prefix
-    m_msgPrefix = params.getValue("message-prefix",msgPrefix);
+    m_msgPrefix = params.getValue(YSTRING("message-prefix"),msgPrefix);
 
     // Verify event timer
     m_verifyTimer.interval(params,"verifyeventinterval",10,120,true,true);
     m_verifyTimer.start();
 
     // Media Required
-    m_mediaRequired = (MediaRequired)params.getIntValue("needmedia",
+    m_mediaRequired = (MediaRequired)params.getIntValue(YSTRING("needmedia"),
 	s_mediaRequired,m_mediaRequired);
 }
 
@@ -154,8 +154,36 @@ bool SignallingCallControl::reserveCircuit(SignallingCircuit*& cic, const char* 
 	}
 	cic = m_circuits->reserve(*list,mandatory,checkLock,s,m_circuits->findRange(range));
     }
-    else
+    else if (range) {
+	const char* nRange = range;
+	switch (nRange[0]) {
+	    case '!':
+		mandatory = true;
+		nRange++;
+		break;
+	    case '?':
+		mandatory = false;
+		nRange++;
+		break;
+	}
+	int num = String(nRange).toInteger();
+	if (num > 0) {
+	    // Specific circuit required
+	    SignallingCircuit* circuit = m_circuits->find(num);
+	    if (circuit && !circuit->locked(checkLock) && circuit->reserve()) {
+		if (circuit->ref())
+		    cic = circuit;
+		else
+		    m_circuits->release(circuit);
+	    }
+	    if (cic || mandatory)
+		return (cic != 0);
+	    DDebug(DebugInfo,"SignallingCallControl. Fallback, circuit %u not available [%p]",num,this);
+	}
 	cic = m_circuits->reserve(checkLock,-1,m_circuits->findRange(range));
+    }
+    else
+	cic = m_circuits->reserve(checkLock,-1);
     return (cic != 0);
 }
 
@@ -185,6 +213,16 @@ bool SignallingCallControl::releaseCircuit(unsigned int code, bool sync)
 SignallingEvent* SignallingCallControl::getEvent(const Time& when)
 {
     lock();
+    // Verify ?
+    if (m_verifyEvent && m_verifyTimer.timeout(when.msec())) {
+	SignallingMessage* msg = new SignallingMessage;
+	SignallingEvent* event = new SignallingEvent(SignallingEvent::Verify,msg,this);
+	buildVerifyEvent(msg->params());
+	TelEngine::destruct(msg);
+	setVerify(true,false,&when);
+	unlock();
+	return event;
+    }
     ListIterator iter(m_calls);
     for (;;) {
 	SignallingCall* call = static_cast<SignallingCall*>(iter.get());
@@ -220,14 +258,6 @@ SignallingEvent* SignallingCallControl::getEvent(const Time& when)
 		return event;
 	}
     }
-    // Verify ?
-    if (m_verifyTimer.timeout(when.msecNow()) && m_verifyEvent) {
-	SignallingMessage* msg = new SignallingMessage;
-	SignallingEvent* event = new SignallingEvent(SignallingEvent::Verify,msg,this);
-	buildVerifyEvent(msg->params());
-	m_verifyTimer.start(when.msecNow());
-	return event;
-    }
     // Terminate if exiting and no more calls
     //TODO: Make sure we raise this event one time only
     if (exiting() && !m_calls.skipNull())
@@ -254,6 +284,19 @@ void SignallingCallControl::removeCall(SignallingCall* call, bool del)
 	    "SignallingCallControl. Call (%p) removed%s from queue [%p]",
 	    call,(del ? " and deleted" : ""),this);
     unlock();
+}
+
+// Set the verify event flag. Restart/fire verify timer
+void SignallingCallControl::setVerify(bool restartTimer, bool fireNow, const Time* time)
+{
+    m_verifyEvent = true;
+    if (!restartTimer)
+	return;
+    m_verifyTimer.stop();
+    if (!fireNow)
+	m_verifyTimer.start(time ? time->msec() : Time::msecNow());
+    else
+	m_verifyTimer.fire();
 }
 
 
@@ -604,6 +647,17 @@ SignallingCircuitRange::SignallingCircuitRange(const String& rangeStr,
     add(rangeStr);
 }
 
+// Allocate and return an array containing range circuits
+unsigned int* SignallingCircuitRange::copyRange(unsigned int& count) const
+{
+    if (!m_count)
+	return 0;
+    count = m_count;
+    unsigned int* tmp = new unsigned int[count];
+    ::memcpy(tmp,range(),m_range.length());
+    return tmp;
+}
+
 // Add codes to this range from a string
 bool SignallingCircuitRange::add(const String& rangeStr)
 {
@@ -789,7 +843,7 @@ SignallingCircuitSpan* SignallingCircuitGroup::buildSpan(const String& name, uns
 	    : NamedList(name), m_group(group)
 	    { }
 	virtual void* getObject(const String& name) const
-	    { return (name == "SignallingCircuitGroup") ? m_group : NamedList::getObject(name); }
+	    { return (name == YSTRING("SignallingCircuitGroup")) ? m_group : NamedList::getObject(name); }
 	SignallingCircuitGroup* m_group;
     };
 
@@ -959,7 +1013,7 @@ SignallingCircuit* SignallingCircuitGroup::reserve(int checkLock, int strategy,
 	    break;
 	default:
 	    while ((range->m_last > 1) && (n == range->m_used))
-		n = ::random() % range->m_last;
+		n = Random::random() % range->m_last;
     }
     // then go to the proper even/odd start circuit
     adjustParity(n,strategy,up);
@@ -1174,15 +1228,15 @@ AnalogLine::AnalogLine(AnalogLineGroup* grp, unsigned int cic, const NamedList& 
     if (m_type == Recorder)
 	m_type = FXO;
     m_address << m_group->toString() << "/" << m_circuit->code();
-    m_inband = params.getBoolValue("dtmfinband",false);
-    String tmp = params.getValue("echocancel");
+    m_inband = params.getBoolValue(YSTRING("dtmfinband"),false);
+    String tmp = params.getValue(YSTRING("echocancel"));
     if (tmp.isBoolean())
 	m_echocancel = tmp.toBoolean() ? 1 : -1;
-    m_answerOnPolarity = params.getBoolValue("answer-on-polarity",false);
-    m_hangupOnPolarity = params.getBoolValue("hangup-on-polarity",false);
-    m_polarityControl = params.getBoolValue("polaritycontrol",false);
+    m_answerOnPolarity = params.getBoolValue(YSTRING("answer-on-polarity"),false);
+    m_hangupOnPolarity = params.getBoolValue(YSTRING("hangup-on-polarity"),false);
+    m_polarityControl = params.getBoolValue(YSTRING("polaritycontrol"),false);
 
-    m_callSetup = (CallSetupInfo)lookup(params.getValue("callsetup"),csNames(),After);
+    m_callSetup = (CallSetupInfo)lookup(params.getValue(YSTRING("callsetup")),csNames(),After);
 
     m_callSetupTimeout = getValidInt(params,"callsetup-timeout",2000);
     m_noRingTimeout = getValidInt(params,"ring-timeout",10000);
@@ -1192,9 +1246,9 @@ AnalogLine::AnalogLine(AnalogLineGroup* grp, unsigned int cic, const NamedList& 
     DDebug(m_group,DebugAll,"AnalogLine() addr=%s type=%s [%p]",
 	address(),lookup(m_type,typeNames()),this);
 
-    if (!params.getBoolValue("out-of-service",false)) {
+    if (!params.getBoolValue(YSTRING("out-of-service"),false)) {
 	resetCircuit();
-	if (params.getBoolValue("connect",true))
+	if (params.getBoolValue(YSTRING("connect"),true))
 	    connect(false);
     }
     else

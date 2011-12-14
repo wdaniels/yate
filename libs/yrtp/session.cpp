@@ -73,7 +73,7 @@ unsigned int RTPBaseIO::ssrcInit()
     if (m_ssrcInit) {
 	m_ssrcInit = false;
 	do {
-	    m_ssrc = ::random();
+	    m_ssrc = Random::random();
 	} while (0 == m_ssrc);
     }
     return m_ssrc;
@@ -396,9 +396,9 @@ RTPSender::RTPSender(RTPSession* session, bool randomTs)
     : RTPBaseIO(session), m_evTime(0), m_padding(0)
 {
     if (randomTs) {
-	m_ts = ::random() & ~1;
+	m_ts = Random::random() & ~1;
 	// avoid starting sequence numbers too close to zero
-	m_seq = 2500 + (::random() % 60000);
+	m_seq = 2500 + (Random::random() % 60000);
     }
 }
 
@@ -711,7 +711,8 @@ void RTPSession::rtcpData(const void* data, int len)
     if ((m_direction & RecvOnly) == 0)
 	return;
     if (m_recv) {
-	m_timeoutTime = 0;
+	if ((m_timeoutTime != INF_TIMEOUT) || m_recv->ssrc())
+	    m_timeoutTime = 0;
 	m_recv->rtcpData(data,len);
     }
 }
@@ -884,7 +885,7 @@ void RTPSession::setReports(int interval)
 	    interval = 500;
 	else if (interval > 60000)
 	    interval = 60000;
-	m_reportInterval = interval * (u_int64_t)1000 + (::random() % 20000);
+	m_reportInterval = interval * (u_int64_t)1000 + (Random::random() % 20000);
     }
     else
 	m_reportInterval = 0;
@@ -975,7 +976,7 @@ void RTPSession::sendRtcpBye()
 
 void RTPSession::incWrongSrc() 
 {
-    Debug(DebugAll,"RTPSession::incWrongSrc() [%p]",this);
+    XDebug(DebugAll,"RTPSession::incWrongSrc() [%p]",this);
     m_wrongSrc++;
 }
 

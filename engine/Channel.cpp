@@ -93,7 +93,7 @@ Mutex& CallEndpoint::commonMutex()
 
 void* CallEndpoint::getObject(const String& name) const
 {
-    if (name == "CallEndpoint")
+    if (name == YSTRING("CallEndpoint"))
 	return const_cast<CallEndpoint*>(this);
     return RefObject::getObject(name);
 }
@@ -320,6 +320,9 @@ bool CallEndpoint::clearData(DataNode* node, const char* type)
 
 static const String s_disconnected("chan.disconnected");
 
+// Mutex used to lock disconnect parameters during access
+static Mutex s_paramMutex(true,"ChannelParams");
+
 Channel::Channel(Driver* driver, const char* id, bool outgoing)
     : CallEndpoint(id),
       m_parameters(""), m_driver(driver), m_outgoing(outgoing),
@@ -348,11 +351,16 @@ Channel::~Channel()
 
 void* Channel::getObject(const String& name) const
 {
-    if (name == "Channel")
+    if (name == YSTRING("Channel"))
 	return const_cast<Channel*>(this);
-    if (name == "MessageNotifier")
+    if (name == YSTRING("MessageNotifier"))
 	return static_cast<MessageNotifier*>(const_cast<Channel*>(this));
     return CallEndpoint::getObject(name);
+}
+
+Mutex& Channel::paramMutex()
+{
+    return s_paramMutex;
 }
 
 void Channel::init()
@@ -455,17 +463,21 @@ void Channel::disconnected(bool final, const char* reason)
 	return;
     // last chance to get reconnected to something
     Message* m = getDisconnect(reason);
+    s_paramMutex.lock();
     m_targetid.clear();
     m_parameters.clearParams();
+    s_paramMutex.unlock();
     Engine::enqueue(m);
 }
 
 void Channel::setDisconnect(const NamedList* params)
 {
     DDebug(this,DebugInfo,"setDisconnect(%p) [%p]",params,this);
+    s_paramMutex.lock();
     m_parameters.clearParams();
     if (params)
 	m_parameters.copyParams(*params);
+    s_paramMutex.unlock();
 }
 
 void Channel::endDisconnect(const Message& msg, bool handled)
@@ -488,7 +500,9 @@ void Channel::setId(const char* newId)
 Message* Channel::getDisconnect(const char* reason)
 {
     Message* msg = new Message(s_disconnected);
+    s_paramMutex.lock();
     msg->copyParams(m_parameters);
+    s_paramMutex.unlock();
     complete(*msg);
     if (reason)
 	msg->setParam("reason",reason);
@@ -500,8 +514,9 @@ Message* Channel::getDisconnect(const char* reason)
 
 void Channel::status(const char* newstat)
 {
+    Lock lock(mutex());
     m_status = newstat;
-    if (!m_answered && (m_status == "answered")) {
+    if (!m_answered && (m_status == YSTRING("answered"))) {
 	m_maxcall = 0;
 	m_answered = true;
     }
@@ -514,13 +529,13 @@ const char* Channel::direction() const
 
 void Channel::setMaxcall(const Message* msg)
 {
-    int tout = msg ? msg->getIntValue("maxcall") : 0;
+    int tout = msg ? msg->getIntValue(YSTRING("maxcall")) : 0;
     if (tout > 0)
 	maxcall(Time::now() + tout*(u_int64_t)1000);
     else
 	maxcall(0);
     if (msg) {
-	tout = msg->getIntValue("timeout",-1);
+	tout = msg->getIntValue(YSTRING("timeout"),-1);
 	if (tout > 0)
 	    timeout(Time::now() + tout*(u_int64_t)1000);
 	else if (tout == 0)
@@ -535,8 +550,11 @@ void Channel::complete(Message& msg, bool minimal) const
     msg.setParam("id",id());
     if (m_driver)
 	msg.setParam("module",m_driver->name());
-    if (s_hangup == msg)
+    if (s_hangup == msg) {
+	s_paramMutex.lock();
 	msg.copyParams(parameters());
+	s_paramMutex.unlock();
+    }
 
     if (minimal)
 	return;
@@ -571,7 +589,7 @@ Message* Channel::message(const char* name, const NamedList* original, const cha
     Message* msg = message(name,minimal,data);
     if (original) {
 	if (!params)
-	    params = original->getValue("copyparams");
+	    params = original->getValue(YSTRING("copyparams"));
 	if (!null(params))
 	    msg->copyParams(*original,params);
     }
@@ -601,7 +619,7 @@ bool Channel::msgProgress(Message& msg)
 {
     status("progressing");
     if (m_billid.null())
-	m_billid = msg.getValue("billid");
+	m_billid = msg.getValue(YSTRING("billid"));
     return true;
 }
 
@@ -609,7 +627,7 @@ bool Channel::msgRinging(Message& msg)
 {
     status("ringing");
     if (m_billid.null())
-	m_billid = msg.getValue("billid");
+	m_billid = msg.getValue(YSTRING("billid"));
     return true;
 }
 
@@ -619,7 +637,7 @@ bool Channel::msgAnswered(Message& msg)
     m_answered = true;
     status("answered");
     if (m_billid.null())
-	m_billid = msg.getValue("billid");
+	m_billid = msg.getValue(YSTRING("billid"));
     return true;
 }
 
@@ -654,21 +672,21 @@ bool Channel::msgUpdate(Message& msg)
 bool Channel::msgMasquerade(Message& msg)
 {
     if (m_billid.null())
-	m_billid = msg.getValue("billid");
-    if (msg == "call.answered") {
+	m_billid = msg.getValue(YSTRING("billid"));
+    if (msg == YSTRING("call.answered")) {
 	Debug(this,DebugInfo,"Masquerading answer operation [%p]",this);
 	m_maxcall = 0;
 	m_status = "answered";
     }
-    else if (msg == "call.progress") {
+    else if (msg == YSTRING("call.progress")) {
 	Debug(this,DebugInfo,"Masquerading progress operation [%p]",this);
 	status("progressing");
     }
-    else if (msg == "call.ringing") {
+    else if (msg == YSTRING("call.ringing")) {
 	Debug(this,DebugInfo,"Masquerading ringing operation [%p]",this);
 	status("ringing");
     }
-    else if (msg == "chan.dtmf") {
+    else if (msg == YSTRING("chan.dtmf")) {
 	// add sequence, stop the message if it was a disallowed DTMF duplicate
 	if (dtmfSequence(msg) && m_driver && !m_driver->m_dtmfDups) {
 	    Debug(this,DebugNote,"Stopping duplicate '%s' DTMF '%s' [%p]",
@@ -747,7 +765,7 @@ bool Channel::callPrerouted(Message& msg, bool handled)
 {
     status("prerouted");
     // accept a new billid at this stage
-    String* str = msg.getParam("billid");
+    String* str = msg.getParam(YSTRING("billid"));
     if (str)
 	m_billid = *str;
     return true;
@@ -757,7 +775,7 @@ bool Channel::callRouted(Message& msg)
 {
     status("routed");
     if (m_billid.null())
-	m_billid = msg.getValue("billid");
+	m_billid = msg.getValue(YSTRING("billid"));
     return true;
 }
 
@@ -768,21 +786,21 @@ void Channel::callAccept(Message& msg)
     if (tout > 0)
 	timeout(Time::now() + tout*(u_int64_t)1000);
     if (m_billid.null())
-	m_billid = msg.getValue("billid");
-    m_targetid = msg.getValue("targetid");
-    String detect = msg.getValue("tonedetect_in");
+	m_billid = msg.getValue(YSTRING("billid"));
+    m_targetid = msg.getValue(YSTRING("targetid"));
+    String detect = msg.getValue(YSTRING("tonedetect_in"));
     if (detect && detect.toBoolean(true)) {
 	if (detect.toBoolean(false))
 	    detect = "tone/*";
 	toneDetect(detect);
     }
-    if (msg.getBoolValue("autoanswer"))
+    if (msg.getBoolValue(YSTRING("autoanswer")))
 	msgAnswered(msg);
-    else if (msg.getBoolValue("autoring"))
+    else if (msg.getBoolValue(YSTRING("autoring")))
 	msgRinging(msg);
-    else if (msg.getBoolValue("autoprogress"))
+    else if (msg.getBoolValue(YSTRING("autoprogress")))
 	msgProgress(msg);
-    else if (m_targetid.null() && msg.getBoolValue("autoanswer",true)) {
+    else if (m_targetid.null() && msg.getBoolValue(YSTRING("autoanswer"),true)) {
 	// no preference exists in the message so issue a notice
 	Debug(this,DebugNote,"Answering now call %s because we have no targetid [%p]",
 	    id().c_str(),this);
@@ -792,7 +810,7 @@ void Channel::callAccept(Message& msg)
 
 void Channel::callConnect(Message& msg)
 {
-    String detect = msg.getValue("tonedetect_out");
+    String detect = msg.getValue(YSTRING("tonedetect_out"));
     if (detect && detect.toBoolean(true)) {
 	if (detect.toBoolean(false))
 	    detect = "tone/*";
@@ -808,11 +826,11 @@ void Channel::callRejected(const char* error, const char* reason, const Message*
 
 bool Channel::dtmfSequence(Message& msg)
 {
-    if ((msg != "chan.dtmf") || msg.getParam("sequence"))
+    if ((msg != YSTRING("chan.dtmf")) || msg.getParam(YSTRING("sequence")))
 	return false;
     bool duplicate = false;
-    const String* detected = msg.getParam("detected");
-    const String* text = msg.getParam("text");
+    const String* detected = msg.getParam(YSTRING("detected"));
+    const String* text = msg.getParam(YSTRING("text"));
     Lock lock(mutex());
     unsigned int seq = m_dtmfSeq;
     if (text && detected &&
@@ -944,7 +962,7 @@ Module::~Module()
 
 void* Module::getObject(const String& name) const
 {
-    if (name == "Module")
+    if (name == YSTRING("Module"))
 	return const_cast<Module*>(this);
     return Plugin::getObject(name);
 }
@@ -1064,11 +1082,11 @@ bool Module::msgRoute(Message& msg)
 
 bool Module::msgCommand(Message& msg)
 {
-    const NamedString* line = msg.getParam("line");
+    const NamedString* line = msg.getParam(YSTRING("line"));
     if (line)
 	return commandExecute(msg.retValue(),*line);
-    if (msg.getParam("partline") || msg.getParam("partword"))
-	return commandComplete(msg,msg.getValue("partline"),msg.getValue("partword"));
+    if (msg.getParam(YSTRING("partline")) || msg.getParam(YSTRING("partword")))
+	return commandComplete(msg,msg.getValue(YSTRING("partline")),msg.getValue(YSTRING("partword")));
     return false;
 }
 
@@ -1079,7 +1097,7 @@ bool Module::commandExecute(String& retVal, const String& line)
 
 bool Module::commandComplete(Message& msg, const String& partLine, const String& partWord)
 {
-    if ((partLine == "debug") || (partLine == "status"))
+    if ((partLine == YSTRING("debug")) || (partLine == YSTRING("status")))
 	itemComplete(msg.retValue(),name(),partWord);
     return false;
 }
@@ -1096,7 +1114,7 @@ bool Module::itemComplete(String& itemList, const String& item, const String& pa
 void Module::msgStatus(Message& msg)
 {
     String mod, par, det;
-    bool details = msg.getBoolValue("details",true);
+    bool details = msg.getBoolValue(YSTRING("details"),true);
     lock();
     statusModule(mod);
     statusParams(par);
@@ -1143,7 +1161,7 @@ bool Module::received(Message &msg, int id)
 	    return msgRoute(msg);
     }
 
-    String dest = msg.getValue("module");
+    String dest = msg.getValue(YSTRING("module"));
 
     if (id == Status) {
 	if (dest == name()) {
@@ -1211,7 +1229,7 @@ Driver::Driver(const char* name, const char* type)
 
 void* Driver::getObject(const String& name) const
 {
-    if (name == "Driver")
+    if (name == YSTRING("Driver"))
 	return const_cast<Driver*>(this);
     return Module::getObject(name);
 }
@@ -1276,12 +1294,13 @@ bool Driver::received(Message &msg, int id)
 		    if (!c)
 			break;
 		    c->checkTimers(msg,t);
+		    c = 0;
 		    lock();
 		}
 	    }
 	case Status:
 	    // check if it's a channel status request
-	    dest = msg.getValue("module");
+	    dest = msg.getValue(YSTRING("module"));
 	    if (dest.startsWith(m_prefix))
 		break;
 	case Level:
@@ -1292,18 +1311,18 @@ bool Driver::received(Message &msg, int id)
 	    dropAll(msg);
 	    return false;
 	case Execute:
-	    dest = msg.getValue("callto");
+	    dest = msg.getValue(YSTRING("callto"));
 	    break;
 	case Drop:
 	case Masquerade:
 	case Locate:
-	    dest = msg.getValue("id");
+	    dest = msg.getValue(YSTRING("id"));
 	    break;
 	default:
-	    dest = msg.getValue("peerid");
+	    dest = msg.getValue(YSTRING("peerid"));
 	    // if this channel is not the peer, try to match it as target
 	    if (!dest.startsWith(m_prefix))
-		dest = msg.getValue("targetid");
+		dest = msg.getValue(YSTRING("targetid"));
 	    break;
     }
     XDebug(DebugAll,"id=%d prefix='%s' dest='%s'",id,m_prefix.c_str(),dest.c_str());
@@ -1321,7 +1340,7 @@ bool Driver::received(Message &msg, int id)
 	if (!canAccept(false))
 	    return false;
 	if (dest.startSkip(m_prefix,false) ||
-	    (dest.startSkip("line/",false) && hasLine(msg.getValue("line"))))
+	    (dest.startSkip("line/",false) && hasLine(msg.getValue(YSTRING("line")))))
 	    return msgExecute(msg,dest);
 	return false;
     }
@@ -1359,8 +1378,8 @@ bool Driver::received(Message &msg, int id)
 	case Update:
 	    return chan->msgUpdate(msg);
 	case Masquerade:
-	    msg = msg.getValue("message");
-	    msg.clearParam("message");
+	    msg = msg.getValue(YSTRING("message"));
+	    msg.clearParam(YSTRING("message"));
 	    msg.userData(chan);
 	    if (chan->msgMasquerade(msg))
 		return true;
@@ -1377,7 +1396,7 @@ bool Driver::received(Message &msg, int id)
 
 void Driver::dropAll(Message &msg)
 {
-    const char* reason = msg.getValue("reason");
+    const char* reason = msg.getValue(YSTRING("reason"));
     lock();
     ListIterator iter(m_chans);
     for (;;) {
@@ -1422,12 +1441,12 @@ bool Driver::hasLine(const String& line) const
 
 bool Driver::msgRoute(Message& msg)
 {
-    String called = msg.getValue("called");
+    String called = msg.getValue(YSTRING("called"));
     if (called.null())
 	return false;
-    String line = msg.getValue("line");
+    String line = msg.getValue(YSTRING("line"));
     if (line.null())
-	line = msg.getValue("account");
+	line = msg.getValue(YSTRING("account"));
     if (line && hasLine(line)) {
 	// asked to route to a line we have locally
 	msg.setParam("line",line);
@@ -1472,7 +1491,7 @@ void Driver::statusDetail(String& str)
 bool Driver::commandComplete(Message& msg, const String& partLine, const String& partWord)
 {
     bool ok = false;
-    bool listChans = String(msg.getValue("complete")) == "channels";
+    bool listChans = String(msg.getValue(YSTRING("complete"))) == YSTRING("channels");
     if (listChans && (partWord.null() || name().startsWith(partWord)))
 	msg.retValue().append(name(),"\t");
     else
@@ -1514,10 +1533,10 @@ bool Driver::setDebug(Message& msg, const String& target)
 
 void Driver::loadLimits()
 {
-    timeout(Engine::config().getIntValue("telephony","timeout"));
-    maxRoute(Engine::config().getIntValue("telephony","maxroute"));
-    maxChans(Engine::config().getIntValue("telephony","maxchans"));
-    dtmfDups(Engine::config().getBoolValue("telephony","dtmfdups"));
+    timeout(Engine::config().getIntValue(YSTRING("telephony"),"timeout"));
+    maxRoute(Engine::config().getIntValue(YSTRING("telephony"),"maxroute"));
+    maxChans(Engine::config().getIntValue(YSTRING("telephony"),"maxchans"));
+    dtmfDups(Engine::config().getBoolValue(YSTRING("telephony"),"dtmfdups"));
 }
 
 unsigned int Driver::nextid()
@@ -1554,12 +1573,12 @@ bool Router::route()
     DDebug(m_driver,DebugAll,"Routing thread for '%s' [%p]",m_id.c_str(),this);
 
     RefPointer<Channel> chan;
-    String tmp(m_msg->getValue("callto"));
+    String tmp(m_msg->getValue(YSTRING("callto")));
     bool ok = !tmp.null();
     if (ok)
 	m_msg->retValue() = tmp;
     else {
-	if (*m_msg == "call.preroute") {
+	if (*m_msg == YSTRING("call.preroute")) {
 	    ok = Engine::dispatch(m_msg);
 	    m_driver->lock();
 	    chan = m_driver->find(m_id);
@@ -1568,10 +1587,10 @@ bool Router::route()
 		Debug(m_driver,DebugInfo,"Connection '%s' vanished while prerouting!",m_id.c_str());
 		return false;
 	    }
-	    bool dropCall = ok && ((m_msg->retValue() == "-") || (m_msg->retValue() == "error"));
+	    bool dropCall = ok && ((m_msg->retValue() == YSTRING("-")) || (m_msg->retValue() == YSTRING("error")));
 	    if (dropCall)
-		chan->callRejected(m_msg->getValue("error","unknown"),
-		    m_msg->getValue("reason"),m_msg);
+		chan->callRejected(m_msg->getValue(YSTRING("error"),"unknown"),
+		    m_msg->getValue(YSTRING("reason")),m_msg);
 	    else
 		dropCall = !chan->callPrerouted(*m_msg,ok);
 	    if (dropCall) {
@@ -1599,23 +1618,23 @@ bool Router::route()
     m_msg->userData(chan);
 
     if (ok) {
-	if ((m_msg->retValue() == "-") || (m_msg->retValue() == "error"))
-	    chan->callRejected(m_msg->getValue("error","unknown"),
+	if ((m_msg->retValue() == YSTRING("-")) || (m_msg->retValue() == YSTRING("error")))
+	    chan->callRejected(m_msg->getValue(YSTRING("error"),"unknown"),
 		m_msg->getValue("reason"),m_msg);
-	else if (m_msg->getIntValue("antiloop",1) <= 0)
-	    chan->callRejected(m_msg->getValue("error","looping"),
-		m_msg->getValue("reason","Call is looping"),m_msg);
+	else if (m_msg->getIntValue(YSTRING("antiloop"),1) <= 0)
+	    chan->callRejected(m_msg->getValue(YSTRING("error"),"looping"),
+		m_msg->getValue(YSTRING("reason"),"Call is looping"),m_msg);
 	else if (chan->callRouted(*m_msg)) {
 	    *m_msg = "call.execute";
 	    m_msg->setParam("callto",m_msg->retValue());
-	    m_msg->clearParam("error");
+	    m_msg->clearParam(YSTRING("error"));
 	    m_msg->retValue().clear();
 	    ok = Engine::dispatch(m_msg);
 	    if (ok)
 		chan->callAccept(*m_msg);
 	    else {
-		const char* error = m_msg->getValue("error","noconn");
-		const char* reason = m_msg->getValue("reason","Could not connect to target");
+		const char* error = m_msg->getValue(YSTRING("error"),"noconn");
+		const char* reason = m_msg->getValue(YSTRING("reason"),"Could not connect to target");
 		Message m(s_disconnected);
 		chan->complete(m);
 		m.setParam("error",error);
@@ -1629,8 +1648,8 @@ bool Router::route()
 	}
     }
     else
-	chan->callRejected(m_msg->getValue("error","noroute"),
-	    m_msg->getValue("reason","No route to call target"),m_msg);
+	chan->callRejected(m_msg->getValue(YSTRING("error"),"noroute"),
+	    m_msg->getValue(YSTRING("reason"),"No route to call target"),m_msg);
 
     // dereference again if the channel is dynamic
     if (m_driver->varchan())

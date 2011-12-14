@@ -68,6 +68,7 @@ static Socket s_localSock;
 static bool s_localTime = false;
 static bool s_shortnum = false;
 static bool s_unisocket = false;
+static bool s_printAttr = false;
 static bool s_pb_enabled = false;
 static bool s_pb_parallel = false;
 static bool s_pb_simplify = false;
@@ -350,7 +351,7 @@ public:
     bool addAttribute(const char* attrib, unsigned char subType, const char* val, bool emptyOk = false);
     void addAttributes(NamedList& params, NamedList* list);
     bool prepareAttributes(NamedList& params, bool forAcct = true, String* user = 0);
-    bool returnAttributes(NamedList& params, const ObjList* attributes);
+    bool returnAttributes(NamedList& params, const ObjList* attributes, bool ok = true);
     static bool fillRandom(DataBlock& data, int len);
 
 private:
@@ -881,7 +882,7 @@ bool RadiusClient::fillRandom(DataBlock& data, int len)
     unsigned int r = 0;
     while (len--) {
 	while (!r)
-	    r = ::random() % RAND_MAX;
+	    r = Random::random();
 	*dd++ = r & 0xff;
 	r = r >> 8;
     }
@@ -1291,19 +1292,24 @@ bool RadiusClient::prepareAttributes(NamedList& params, bool forAcct, String* us
 }
 
 // Copy some attributes back from RADIUS answer to parameter list (message)
-bool RadiusClient::returnAttributes(NamedList& params, const ObjList* attributes)
+bool RadiusClient::returnAttributes(NamedList& params, const ObjList* attributes, bool ok)
 {
     Lock lock(s_cfgMutex);
     NamedList* sect = s_cfg.getSection(m_section);
     if (!sect)
 	return false;
 
+    String attrDump;
     for (; attributes; attributes = attributes->next()) {
 	const RadAttrib* attr = static_cast<const RadAttrib*>(attributes->get());
 	if (!attr)
 	    continue;
-	XDebug(&__plugin,DebugInfo,"Returned attribute %d '%s'",attr->code(),attr->name());
-	String tmp("ret:");
+	if (s_printAttr && __plugin.debugAt(DebugAll)) {
+	    String val;
+	    attr->getString(val);
+	    attrDump << "\r\n  " << attr->name() << "='" << val << "'";
+	}
+	String tmp(ok ? "ret:" : "ret-fail:");
 	tmp += attr->name();
 	String* par = sect->getParam(tmp);
 	if (par && *par) {
@@ -1312,12 +1318,16 @@ bool RadiusClient::returnAttributes(NamedList& params, const ObjList* attributes
 	    params.setParam(*par,tmp);
 	}
     }
+    if (attrDump)
+	Debug(&__plugin,DebugAll,"Returned attributes:%s",attrDump.c_str());
     return true;
 }
 
 
 bool AuthHandler::received(Message& msg)
 {
+    if (!msg.getBoolValue("auth_radius",true))
+	return false;
     String proto = msg.getValue("protocol",msg.getValue("module"));
     if (proto.null())
 	return false;
@@ -1356,15 +1366,29 @@ bool AuthHandler::received(Message& msg)
     if (sep >= 0)
 	address = address.substr(0,sep);
     radclient.addAttribute("h323-remote-address",address);
+    String billid = msg.getValue("billid");
+    if (billid) {
+	// create a Cisco-compatible conference ID
+	MD5 cid(billid);
+	String confid;
+	confid << cid.hexDigest().substr(0,8) << " ";
+	confid << cid.hexDigest().substr(8,8) << " ";
+	confid << cid.hexDigest().substr(16,8) << " ";
+	confid << cid.hexDigest().substr(24,8);
+	confid.toUpper();
+	radclient.addAttribute("h323-conf-id",confid);
+    }
 
     ObjList result;
-    if (radclient.doAuthenticate(&result) != AuthSuccess)
+    if (radclient.doAuthenticate(&result) != AuthSuccess) {
+	radclient.returnAttributes(msg,&result,false);
 	return false;
+    }
     // copy back the username we actually authenticated
     if (user)
 	msg.setParam("username",user);
     // and pick whatever other parameters we want to return
-    radclient.returnAttributes(msg,&result);
+    radclient.returnAttributes(msg,&result,true);
     if (s_pb_enabled)
 	portaBillingRoute(msg,&result);
     // signal we don't return a password
@@ -1402,6 +1426,8 @@ static bool ciscoTime(double t, String& ret)
 
 bool AcctHandler::received(Message& msg)
 {
+    if (!msg.getBoolValue("cdrwrite_radius",true))
+	return false;
     String op = msg.getValue("operation");
     int acctStat = 0;
     if (op == "initialize")
@@ -1514,6 +1540,7 @@ void RadiusModule::initialize()
     s_localTime = s_cfg.getBoolValue("general","local_time",false);
     s_shortnum = s_cfg.getBoolValue("general","short_number",false);
     s_unisocket = s_cfg.getBoolValue("general","single_socket",false);
+    s_printAttr = s_cfg.getBoolValue("general","print_attributes",false);
     s_pb_enabled = s_cfg.getBoolValue("portabill","enabled",false);
     s_pb_parallel = s_cfg.getBoolValue("portabill","parallel",false);
     s_pb_simplify = s_cfg.getBoolValue("portabill","simplify",false);

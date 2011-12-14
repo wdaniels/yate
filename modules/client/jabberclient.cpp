@@ -133,15 +133,18 @@ class YJBEntityCapsList : public JBEntityCapsList
 public:
     // Load the entity caps file
     void load();
+    // Set caps file. Save it if changed
+    void setFile(const char* file);
 protected:
     inline void getEntityCapsFile(String& file) {
-	    file = Engine::configPath(Engine::clientMode());
-	    if (!file.endsWith(Engine::pathSeparator()))
-		file << Engine::pathSeparator();
-	    file << "jabberentitycaps.xml";
+	    Lock mylock(this);
+	    file = m_file;
 	}
     // Notify changes and save the entity caps file
     virtual void capsAdded(JBEntityCaps* caps);
+    // Save the file
+    void save();
+    String m_file;
 };
 
 /*
@@ -168,7 +171,7 @@ public:
 	{ TelEngine::destruct(m_presence); }
     // Retrieve a contact
     inline NamedList* contact(const String& name) {
-	    if (name == *this)
+	    if (name &= *this)
 		return this;
 	    ObjList* o = find(name);
 	    return o ? static_cast<NamedList*>(o->get()) : 0;
@@ -694,12 +697,35 @@ void YJBEntityCapsList::load()
     loadXmlDoc(file,s_jabber);
 }
 
+// Set caps file
+void YJBEntityCapsList::setFile(const char* file)
+{
+    Lock mylock(this);
+    String old = m_file;
+    m_file = file;
+    if (!m_file) {
+	m_file = Engine::configPath(Engine::clientMode());
+	if (!m_file.endsWith(Engine::pathSeparator()))
+	    m_file << Engine::pathSeparator();
+	m_file << "jabberentitycaps.xml";
+    }
+    Engine::self()->runParams().replaceParams(m_file);
+    bool changed = m_enable && old && m_file && old != m_file;
+    mylock.drop();
+    if (changed)
+	save();
+}
+
 // Notify changes and save the entity caps file
 void YJBEntityCapsList::capsAdded(JBEntityCaps* caps)
 {
-    if (!caps)
-	return;
-    // Save the file
+    if (caps)
+	save();
+}
+
+// Save the file
+void YJBEntityCapsList::save()
+{
     String file;
     getEntityCapsFile(file);
     saveXmlDoc(file,s_jabber);
@@ -780,7 +806,8 @@ void YJBEngine::processEvent(JBEvent* ev)
 		if (processMucMessage(ev))
 		    break;
 		Message* m = __plugin.message("msg.execute",ev->clientStream());
-		m->addParam("type",ev->stanzaType());
+		const char* tStr = ev->stanzaType();
+		m->addParam("type",tStr ? tStr : XMPPUtils::msgText(XMPPUtils::Normal));
 		m->addParam("id",ev->id(),false);
 		m->addParam("caller",ev->from().bare());
 		m->addParam("caller_instance",ev->from().resource(),false);
@@ -1290,7 +1317,7 @@ bool YJBEngine::handleMsgExecute(Message& msg, const String& line)
 	    TelEngine::destruct(xml);
     }
     TelEngine::destruct(s);
-    return true;
+    return ok;
 }
 
 // Process 'user.login' messages
@@ -2234,7 +2261,7 @@ ObjList* StreamData::find(const String& name)
 {
     for (ObjList* o = m_contacts.skipNull(); o; o = o->skipNext()) {
 	NamedList* c = static_cast<NamedList*>(o->get());
-	if (*c == name)
+	if (*c &= name)
 	    return o;
     }
     return 0;
@@ -2494,6 +2521,7 @@ void JBModule::initialize()
     Output("Initializing module Jabber Client");
     Configuration cfg(Engine::configFile("jabberclient"));
 
+    s_entityCaps.setFile(cfg.getValue("general","entitycaps_file"));
     if (!m_init) {
 	m_init = true;
 	setup();

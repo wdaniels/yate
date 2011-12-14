@@ -38,6 +38,13 @@ namespace { // anonymous
 // maximum size we allow the buffer to grow
 #define MAX_BUFFER 960
 
+// maximum and default number of speakers we track
+#define MAX_SPEAKERS 8
+#define DEF_SPEAKERS 3
+
+// Speaking detector energy square hysteresis
+#define SPEAK_HIST_MIN 16384
+#define SPEAK_HIST_MAX 32768
 
 // Absolute maximum possible energy (square +-32767 wave) - do not change
 #define ENERGY_MAX 1073676289
@@ -100,24 +107,45 @@ public:
 	{ return m_notify; }
     inline int maxLock() const
 	{ return m_maxLock; }
+    inline bool timeout(const Time& time) const
+	{ return m_expire && m_expire < time; }
+    inline bool created()
+	{ return m_created && !(m_created = false); }
     void mix(ConfConsumer* cons = 0);
     void addChannel(ConfChan* chan, bool player = false);
     void delChannel(ConfChan* chan);
+    void addOwner(const String& id);
+    void delOwner(const String& id);
+    bool isOwned() const;
     void dropAll(const char* reason = 0);
     void msgStatus(Message& msg);
     bool setRecording(const NamedList& params);
+    bool setParams(NamedList& params);
+    void update(const NamedList& params);
 private:
     ConfRoom(const String& name, const NamedList& params);
+    // Set the expire time from 'lonely' parameter value
+    // Set the lonely flag if called the first time (no users in conference)
+    void setLonelyTimeout(const String& value);
+    // Set the expire time
+    void setExpire();
     String m_name;
     ObjList m_chans;
+    ObjList m_owners;
     String m_notify;
     String m_playerId;
     bool m_lonely;
+    bool m_created;
     ConfChan* m_record;
     int m_rate;
     int m_users;
     int m_maxusers;
     int m_maxLock;
+    u_int64_t m_expire;
+    unsigned int m_lonelyInterval;
+    ConfChan* m_speakers[MAX_SPEAKERS];
+    int m_trackSpeakers;
+    u_int64_t m_nextSpeakers;
 };
 
 // A conference channel is just a dumb holder of its data channels
@@ -136,7 +164,11 @@ public:
 	{ return m_utility; }
     inline bool isRecorder() const
 	{ return m_room && (m_room->recorder() == this); }
+    inline ConfRoom* room() const
+	{ return m_room; }
     void populateMsg(Message& msg) const;
+protected:
+    void statusParams(String& str);
 private:
     void alterMsg(Message& msg, const char* event);
     RefPointer<ConfRoom> m_room;
@@ -153,24 +185,35 @@ class ConfConsumer : public DataConsumer
     friend class ConfRoom;
     friend class ConfChan;
     friend class ConfSource;
+    YCLASS(ConfConsumer,DataConsumer);
 public:
     ConfConsumer(ConfRoom* room, bool smart = false)
-	: m_room(room), m_src(0), m_muted(false), m_smart(smart),
-	  m_energy2(ENERGY_MIN), m_noise2(ENERGY_MIN)
+	: m_room(room), m_src(0), m_muted(false), m_smart(smart), m_speak(false),
+	  m_energy2(ENERGY_MIN), m_noise2(ENERGY_MIN), m_envelope2(ENERGY_MIN)
 	{ DDebug(DebugAll,"ConfConsumer::ConfConsumer(%p,%s) [%p]",room,String::boolText(smart),this); m_format = room->getFormat(); }
     ~ConfConsumer()
 	{ DDebug(DebugAll,"ConfConsumer::~ConfConsumer() [%p]",this); }
     virtual unsigned long Consume(const DataBlock& data, unsigned long tStamp, unsigned long flags);
+    virtual bool control(NamedList& msg);
     unsigned int energy() const;
     unsigned int noise() const;
+    unsigned int envelope() const;
     inline unsigned int energy2() const
 	{ return m_energy2; }
     inline unsigned int noise2() const
 	{ return m_noise2; }
+    inline unsigned int envelope2() const
+	{ return m_envelope2; }
     inline bool muted() const
 	{ return m_muted; }
+    inline bool smart() const
+	{ return m_smart; }
+    inline bool speaking() const
+	{ return m_smart && m_speak && !m_muted; }
     inline bool hasSignal() const
-	{ return (!m_muted) && (m_buffer.length() > 1) && (m_energy2 >= m_noise2); }
+	{ return (!m_muted) && (m_energy2 >= m_noise2); }
+    inline bool shouldMix() const
+	{ return hasSignal() && (m_buffer.length() > 1); }
 private:
     void consumed(const int* mixed, unsigned int samples);
     void dataForward(const int* mixed, unsigned int samples);
@@ -178,8 +221,10 @@ private:
     ConfSource* m_src;
     bool m_muted;
     bool m_smart;
+    bool m_speak;
     unsigned int m_energy2;
     unsigned int m_noise2;
+    unsigned int m_envelope2;
     DataBlock m_buffer;
 };
 
@@ -206,6 +251,18 @@ public:
     virtual bool received(Message& msg);
 };
 
+// Handler for chan.hangup message
+class HangupHandler : public MessageHandler
+{
+public:
+    inline HangupHandler(unsigned int priority)
+	: MessageHandler("chan.hangup",priority)
+	{ }
+    virtual ~HangupHandler()
+	{ }
+    virtual bool received(Message& msg);
+};
+
 // The driver just holds all the channels (not conferences)
 class ConferenceDriver : public Driver
 {
@@ -214,6 +271,8 @@ public:
     virtual ~ConferenceDriver();
     bool checkRoom(String& room, bool existing, bool counted);
     bool unload();
+    // Change the number of rooms needing timeout check
+    void setConfToutCount(bool on);
 protected:
     virtual void initialize();
     virtual bool received(Message &msg, int id);
@@ -221,7 +280,9 @@ protected:
     virtual bool commandComplete(Message& msg, const String& partLine, const String& partWord);
     virtual void statusParams(String& str);
 private:
-    ConfHandler* m_handler;
+    MessageHandler* m_handler;
+    MessageHandler* m_hangup;
+    unsigned int m_confTout;             // The number of rooms needing timeout check
 };
 
 INIT_PLUGIN(ConferenceDriver);
@@ -255,15 +316,20 @@ ConfRoom* ConfRoom::get(const String& name, const NamedList* params)
     ConfRoom* room = l ? static_cast<ConfRoom*>(l->get()) : 0;
     if (room && !room->ref())
 	room = 0;
-    if (params && !room)
-	room = new ConfRoom(name,*params);
+    if (params) {
+	if (room)
+	    room->update(*params);
+	else
+	    room = new ConfRoom(name,*params);
+    }
     return room;
 }
 
 // Private constructor, always called from ConfRoom::get() with mutex hold
 ConfRoom::ConfRoom(const String& name, const NamedList& params)
-    : m_name(name), m_lonely(false), m_record(0),
-      m_rate(8000), m_users(0), m_maxusers(10), m_maxLock(200)
+    : m_name(name), m_lonely(false), m_created(true), m_record(0),
+      m_rate(8000), m_users(0), m_maxusers(10), m_maxLock(200),
+      m_expire(0), m_lonelyInterval(0), m_nextSpeakers(0)
 {
     DDebug(&__plugin,DebugAll,"ConfRoom::ConfRoom('%s',%p) [%p]",
 	name.c_str(),&params,this);
@@ -271,9 +337,18 @@ ConfRoom::ConfRoom(const String& name, const NamedList& params)
     m_maxusers = params.getIntValue("maxusers",m_maxusers);
     m_maxLock = params.getIntValue("waitlock",m_maxLock);
     m_notify = params.getValue("notify");
-    m_lonely = params.getBoolValue("lonely");
+    m_trackSpeakers = params.getIntValue("speakers",0);
+    if (m_trackSpeakers < 0)
+	m_trackSpeakers = 0;
+    else if (m_trackSpeakers > MAX_SPEAKERS)
+	m_trackSpeakers = MAX_SPEAKERS;
+    else if ((m_trackSpeakers == 0) && params.getBoolValue("speakers"))
+	m_trackSpeakers = DEF_SPEAKERS;
+    setLonelyTimeout(params["lonely"]);
     if (m_rate != 8000)
 	m_format << "/" << m_rate;
+    for (int i = 0; i < MAX_SPEAKERS; i++)
+	m_speakers[i] = 0;
     s_rooms.append(this);
     // possibly create outgoing call to room record utility channel
     setRecording(params);
@@ -299,6 +374,8 @@ void ConfRoom::destroyed()
     // plugin must be locked as the destructor is called when room is dereferenced
     Lock lock(&__plugin);
     s_rooms.remove(this,false);
+    if (m_expire)
+	__plugin.setConfToutCount(false);
     m_chans.clear();
     if (m_notify) {
 	Message* m = new Message("chan.notify");
@@ -319,8 +396,10 @@ void ConfRoom::addChannel(ConfChan* chan, bool player)
     m_chans.append(chan);
     if (player)
 	m_playerId = chan->id();
-    if (chan->isCounted())
+    if (chan->isCounted()) {
 	m_users++;
+	setExpire();
+    }
     if (m_notify && !chan->isUtility()) {
 	String tmp(m_users);
 	Message* m = new Message("chan.notify");
@@ -349,9 +428,12 @@ void ConfRoom::delChannel(ConfChan* chan)
 	m_record = 0;
     if (m_playerId && (chan->id() == m_playerId))
 	m_playerId.clear();
-    if (m_chans.remove(chan,false) && chan->isCounted())
+    if (m_chans.remove(chan,false) && chan->isCounted()) {
 	m_users--;
+	setExpire();
+    }
     bool alone = (m_users == 1);
+    bool notOwned = !isOwned();
     mylock.drop();
     if (m_notify && !chan->isUtility()) {
 	String tmp(m_users);
@@ -372,9 +454,60 @@ void ConfRoom::delChannel(ConfChan* chan)
     }
 
     // cleanup if there are only 1 or 0 (if lonely==true) real users left
-    if (m_users <= (m_lonely ? 0 : 1))
+    if (notOwned)
 	// all channels left are utility or the lonely user - drop them
 	dropAll("hangup");
+}
+
+// Add one owner channel
+void ConfRoom::addOwner(const String& id)
+{
+    if (id.null() || m_owners.find(id))
+	return;
+    m_owners.append(new String(id));
+    DDebug(&__plugin,DebugInfo,"Added owner '%s' to room '%s'",
+	id.c_str(),m_name.c_str());
+}
+
+// Remove one owner channel from the room
+void ConfRoom::delOwner(const String& id)
+{
+    Lock mylock(this);
+    if (!m_owners.find(id))
+	return;
+    m_owners.remove(id);
+    DDebug(&__plugin,DebugInfo,"Removed owner '%s' from room '%s'",
+	id.c_str(),m_name.c_str());
+    if (isOwned())
+	return;
+    // only utilities and a lonely user remains - drop them
+    mylock.drop();
+    dropAll("hangup");
+}
+
+// Check if a room is owned by at least one other channel
+bool ConfRoom::isOwned() const
+{
+    if (!m_users)
+	return false;
+    if (m_lonely || (m_users > 1))
+	return true;
+    unsigned int c = m_owners.count();
+    if (c > 1)
+	return true;
+    else if (c == 0)
+	return false;
+    // one user, one owner - check if the same
+    const String& id = m_owners.skipNull()->get()->toString();
+    for (ObjList* l = m_chans.skipNull(); l; l = l->skipNext()) {
+	const ConfChan* chan = static_cast<const ConfChan*>(l->get());
+	if (chan->isCounted()) {
+	    String id2;
+	    return chan->getPeerId(id2) && (id != id2);
+	}
+    }
+    // should not reach here
+    return true;
 }
 
 // Drop all channels attached to the room, the lock must not be hold
@@ -400,9 +533,14 @@ void ConfRoom::msgStatus(Message& msg)
     msg.retValue() << ",room=" << m_name;
     msg.retValue() << ",maxusers=" << m_maxusers;
     msg.retValue() << ",lonely=" << m_lonely;
+    int exp = 0;
+    if (m_lonely && m_expire)
+	exp = (int)(((int64_t)m_expire - (int64_t)msg.msgTime().usec())/1000);
+    msg.retValue() << ",expire=" << (int)exp;
     msg.retValue() << ",rate=" << m_rate;
     msg.retValue() << ",users=" << m_users;
     msg.retValue() << ",chans=" << m_chans.count();
+    msg.retValue() << ",owners=" << m_owners.count();
     if (m_notify)
 	msg.retValue() << ",notify=" << m_notify;
     if (m_playerId)
@@ -478,6 +616,30 @@ bool ConfRoom::setRecording(const NamedList& params)
     return true;
 }
 
+// Set miscellaneous parameters from and to conference message
+bool ConfRoom::setParams(NamedList& params)
+{
+    // return room parameters
+    params.setParam("newroom",String::boolText(created()));
+    params.setParam("users",String(users()));
+    // possibly set the caller or explicit ID as controller
+    const String* ctl = params.getParam("confowner");
+    if (TelEngine::null(ctl))
+	return false;
+    if (ctl->isBoolean()) {
+	const String* id = params.getParam("id");
+	if (!TelEngine::null(id)) {
+	    if (ctl->toBoolean())
+		addOwner(*id);
+	    else
+		delOwner(*id);
+	}
+    }
+    else
+	addOwner(*ctl);
+    return true;
+}
+
 // Mix in buffered data from all channels, only if we have enough in buffer
 void ConfRoom::mix(ConfConsumer* cons)
 {
@@ -509,6 +671,13 @@ void ConfRoom::mix(ConfConsumer* cons)
     unsigned int chunks = len / DATA_CHUNK;
     if (!chunks)
 	return;
+    int speakVol[MAX_SPEAKERS];
+    ConfChan* speakChan[MAX_SPEAKERS];
+    int spk;
+    for (spk = 0; spk < MAX_SPEAKERS; spk++) {
+	speakVol[spk] = 0;
+	speakChan[spk] = 0;
+    }
     len = chunks * DATA_CHUNK / sizeof(int16_t);
     DataBlock mixbuf(0,len*sizeof(int));
     int* buf = (int*)mixbuf.data();
@@ -517,22 +686,40 @@ void ConfRoom::mix(ConfConsumer* cons)
 	ConfConsumer* co = static_cast<ConfConsumer*>(ch->getConsumer());
 	if (co) {
 	    // avoid mixing in noise
-	    if (co->hasSignal()) {
+	    if (co->shouldMix()) {
 		unsigned int n = co->m_buffer.length() / 2;
 #ifdef XDEBUG
-		int noise = co->noise();
-		int energy = co->energy() - noise;
-		if (energy < 0)
-		    energy = 0;
-		Debug(ch,DebugAll,"Cons %p samp=%u |%s%s>",
-		    co,n,String('#',noise).safe(),
-		    String('=',energy).safe());
+		if (ch->debugAt(DebugAll)) {
+		    int noise = co->noise();
+		    int energy = co->energy() - noise;
+		    if (energy < 0)
+			energy = 0;
+		    int tip = co->envelope() - energy - noise;
+		    if (tip < 0)
+			tip = 0;
+		    Debug(ch,DebugAll,"Cons %p samp=%u |%s%s%s>",
+			co,n,String('#',noise).safe(),
+			String('=',energy).safe(),String('-',tip).safe());
+		}
 #endif
 		if (n > len)
 		    n = len;
 		const int16_t* p = (const int16_t*)co->m_buffer.data();
 		for (unsigned int i=0; i < n; i++)
 		    buf[i] += *p++;
+	    }
+	    if (m_trackSpeakers && m_notify && !ch->isUtility() && co->speaking()) {
+		int vol = co->envelope();
+		for (spk = m_trackSpeakers-1; spk >= 0; spk--) {
+		    if (vol <= speakVol[spk])
+			break;
+		    if (spk < MAX_SPEAKERS-1) {
+			speakVol[spk+1] = speakVol[spk];
+			speakChan[spk+1] = speakChan[spk];
+		    }
+		    speakVol[spk] = vol;
+		    speakChan[spk] = ch;
+		}
 	    }
 	}
     }
@@ -551,8 +738,123 @@ void ConfRoom::mix(ConfConsumer* cons)
 	*p++ = (val < -32767) ? -32767 : ((val > 32767) ? 32767 : val);
     }
     mixbuf.clear();
+    Message* m = 0;
+    if (m_trackSpeakers && m_notify) {
+	u_int64_t now = Time::now();
+	bool notify = false;
+	bool changed = false;
+	// check if the list of speakers changed or not, exclude order change
+	for (spk = 0; spk < m_trackSpeakers; spk++) {
+	    changed = true;
+	    for (int i = 0; i < m_trackSpeakers; i++) {
+		if (m_speakers[spk] == speakChan[i]) {
+		    changed = false;
+		    break;
+		}
+	    }
+	    if (changed)
+		break;
+	}
+	if (!changed) {
+	    for (spk = 0; spk < m_trackSpeakers; spk++) {
+		changed = true;
+		for (int i = 0; i < m_trackSpeakers; i++) {
+		    if (m_speakers[i] == speakChan[spk]) {
+			changed = false;
+			break;
+		    }
+		}
+		if (changed)
+		    break;
+	    }
+	}
+	// check if anything changed
+	for (spk = 0; spk < m_trackSpeakers; spk++) {
+	    if (m_speakers[spk] != speakChan[spk]) {
+		m_speakers[spk] = speakChan[spk];
+		notify = true;
+	    }
+	}
+	// if we have speaker(s) notify periodically
+	if (!notify)
+	    notify = m_speakers[0] && (now >= m_nextSpeakers);
+	if (notify) {
+	    m = new Message("chan.notify");
+	    m->userData(this);
+	    m->addParam("targetid",m_notify);
+	    m->addParam("event","speaking");
+	    m->addParam("room",m_name);
+	    m->addParam("maxusers",String(m_maxusers));
+	    for (spk = 0; spk < m_trackSpeakers; spk++) {
+		if (!speakChan[spk])
+		    break;
+		String param("speaker.");
+		param << (spk+1);
+		m->addParam(param,speakChan[spk]->id());
+		String peer;
+		if (speakChan[spk]->getPeerId(peer))
+		    m->addParam(param + ".peer",peer);
+		m->addParam(param + ".energy",String(speakVol[spk]));
+	    }
+	    m->addParam("speakers",String(spk));
+	    m->addParam("changed",String::boolText(changed));
+	    // repeat notification at least once every 5s if someone speaks
+	    m_nextSpeakers = now + 5000000;
+	}
+    }
     mylock.drop();
     Forward(data);
+    if (m)
+	Engine::enqueue(m);
+}
+
+// Update room data
+void ConfRoom::update(const NamedList& params)
+{
+    String* l = params.getParam("lonely");
+    if (l)
+	setLonelyTimeout(*l);
+}
+
+// Set the expire time from 'lonely' parameter value
+// Set the lonely flag if called the first time (no users in conference)
+void ConfRoom::setLonelyTimeout(const String& value)
+{
+    int interval = value.toInteger(-1);
+    if (!m_users) {
+	m_lonely = value.toBoolean(interval >= 0);
+	DDebug(&__plugin,DebugAll,"ConfRoom(%s) lonely=%u [%p]",m_name.c_str(),m_lonely,this);
+    }
+    if (!m_lonely || interval < 0)
+	return;
+    if (interval > 0 && interval < 1000)
+	interval = 1000;
+    if ((int)m_lonelyInterval == interval)
+	return;
+    m_lonelyInterval = interval;
+    DDebug(&__plugin,DebugAll,"ConfRoom(%s) set lonely interval to %ums [%p]",
+	m_name.c_str(),m_lonelyInterval,this);
+    setExpire();
+}
+
+// Set the expire time
+void ConfRoom::setExpire()
+{
+    if (!m_lonely)
+	return;
+    bool changed = true;
+    if (m_users == 1 && m_lonelyInterval) {
+	changed = !m_expire;
+	m_expire = Time::now() + m_lonelyInterval * 1000;
+    }
+    else if (m_expire)
+	m_expire = 0;
+    else
+	return;
+    DDebug(&__plugin,DebugAll,"ConfRoom(%s) %s lonely timeout users=%d [%p]",
+	m_name.c_str(),(m_expire ? "started" : "stopped"),m_users,this);
+    if (changed)
+	__plugin.setConfToutCount(m_expire != 0);
 }
 
 
@@ -585,6 +887,13 @@ unsigned long ConfConsumer::Consume(const DataBlock& data, unsigned long tStamp,
 	// but never below our arbitrary absolute minimum
 	if (m_noise2 < ENERGY_MIN)
 	    m_noise2 = ENERGY_MIN;
+	// compute envelope, faster attack than decay
+	if (m_energy2 > m_envelope2)
+	    m_envelope2 = (unsigned int)(((u_int64_t)m_envelope2 * 7 + m_energy2) >> 3);
+	else
+	    m_envelope2 = (unsigned int)(((u_int64_t)m_envelope2 * 15 + m_energy2) >> 4);
+	// detect speech or noises, apply hysteresis
+	m_speak = (m_envelope2 >> 1) > (m_noise2 + (m_speak ? SPEAK_HIST_MIN : SPEAK_HIST_MAX));
     }
     bool autoMute = true;
     int maxLock = 1000 * m_room->maxLock();
@@ -658,7 +967,7 @@ void ConfConsumer::dataForward(const int* mixed, unsigned int samples)
     for (unsigned int i=0; i < samples; i++) {
 	int val = *mixed++;
 	// substract our own data if we contributed - only as much as we have
-	if ((i < n) && hasSignal())
+	if ((i < n) && shouldMix())
 	    val -= d[i];
 	// saturate symmetrically the result of additions and substraction
 	*p++ = (val < -32767) ? -32767 : ((val > 32767) ? 32767 : val);
@@ -674,6 +983,27 @@ unsigned int ConfConsumer::energy() const
 unsigned int ConfConsumer::noise() const
 {
     return binLog(m_noise2);
+}
+
+unsigned int ConfConsumer::envelope() const
+{
+    return binLog(m_envelope2);
+}
+
+bool ConfConsumer::control(NamedList& msg)
+{
+    bool ok = false;
+    const String* param = msg.getParam(YSTRING("mute"));
+    if (param && param->isBoolean()) {
+	m_muted = param->toBoolean();
+	ok = true;
+    }
+    param = msg.getParam(YSTRING("smart"));
+    if (param && param->isBoolean()) {
+	m_smart = param->toBoolean();
+	ok = true;
+    }
+    return DataConsumer::control(msg) || ok;
 }
 
 
@@ -825,6 +1155,24 @@ void ConfChan::alterMsg(Message& msg, const char* event)
     }
 }
 
+void ConfChan::statusParams(String& str)
+{
+    Channel::statusParams(str);
+    __plugin.lock();
+    RefPointer<ConfConsumer> cons = YOBJECT(ConfConsumer,getConsumer());
+    __plugin.unlock();
+    if (cons) {
+	bool sig = cons->hasSignal();
+	str << ",mute=" << cons->muted();
+	str << ",signal=" << sig;
+	if (cons->smart() && !cons->muted()) {
+	    str << ",noise=" << cons->noise();
+	    if (sig)
+		str << ",energy=" << cons->energy();
+	}
+    }
+}
+
 
 bool ConfHandler::received(Message& msg)
 {
@@ -839,6 +1187,7 @@ bool ConfHandler::received(Message& msg)
 	ConfRoom* cr = ConfRoom::get(room);
 	if (cr) {
 	    ok = cr->setRecording(msg);
+	    ok = cr->setParams(msg) || ok;
 	    cr->deref();
 	}
 	if (!ok)
@@ -876,7 +1225,6 @@ bool ConfHandler::received(Message& msg)
     c->initChan();
     if (chan->connect(c,reason,false)) {
 	msg.setParam("peerid",c->id());
-	c->deref();
 	msg.setParam("room",__plugin.prefix()+room);
 	if (peer) {
 	    // create a conference leg for the old peer too
@@ -885,9 +1233,28 @@ bool ConfHandler::received(Message& msg)
 	    peer->connect(p,reason,false);
 	    p->deref();
 	}
+	if (c->room())
+	    c->room()->setParams(msg);
+	c->deref();
 	return true;
     }
     c->destruct();
+    return false;
+}
+
+
+bool HangupHandler::received(Message& msg)
+{
+    const String* id = msg.getParam("id");
+    if (TelEngine::null(id))
+	return false;
+    __plugin.lock();
+    ListIterator iter(s_rooms);
+    while (ConfRoom* room = static_cast<ConfRoom*>(iter.get())) {
+	if (room->alive())
+	    room->delOwner(*id);
+    }
+    __plugin.unlock();
     return false;
 }
 
@@ -922,6 +1289,36 @@ bool ConferenceDriver::received(Message &msg, int id)
 	}
 	return true;
     }
+    if (id == Timer) {
+	// Use a while to break
+	while (m_confTout) {
+	    lock();
+	    if (!m_confTout) {
+		unlock();
+		break;
+	    }
+	    ListIterator iter(s_rooms);
+	    Time t;
+	    for (;;) {
+		RefPointer<ConfRoom> room = static_cast<ConfRoom*>(iter.get());
+		unlock();
+		if (!room)
+		    break;
+		if (room->timeout(t)) {
+		    Lock mylock(room,500000);
+		    if (mylock.locked() && !room->isOwned()) {
+			Debug(this,DebugAll,"Room (%p) '%s' timed out",
+			    (ConfRoom*)room,room->toString().c_str());
+			mylock.drop();
+			room->dropAll("timeout");
+		    }
+		}
+		room = 0;
+		lock();
+	    }
+	    break;
+	}
+    }
     return Driver::received(msg,id);
 }
 
@@ -934,7 +1331,9 @@ bool ConferenceDriver::received(Message &msg, int id)
 	"maxusers" - maximum number of users allowed to connect to this
 	    conference, not counting utility channels
 	"lonely" - set to true to allow lonely users to remain in conference
-	    else they will be disconnected
+	    else they will be disconnected. A valid integer (>= 0) will
+	    be interpreted as lonely timeout interval (ms).
+	    In the initial state a value of 0 indicates lonely=true
 	"notify" - ID used for "chan.notify" room notifications, an empty
 	    string (default) will disable notifications
 	"record" - route that will make an outgoing record-only call
@@ -969,8 +1368,10 @@ bool ConferenceDriver::msgExecute(Message& msg, String& dest)
 	if (ch->connect(c,msg.getValue("reason"))) {
 	    c->callConnect(msg);
 	    msg.setParam("peerid",c->id());
-	    c->deref();
 	    msg.setParam("room",prefix()+dest);
+	    if (c->room())
+		c->room()->setParams(msg);
+	    c->deref();
 	    return true;
 	}
 	else {
@@ -1013,11 +1414,24 @@ bool ConferenceDriver::unload()
     uninstallRelays();
     Engine::uninstall(m_handler);
     m_handler = 0;
+    Engine::uninstall(m_hangup);
+    m_hangup = 0;
     return true;
 }
 
+void ConferenceDriver::setConfToutCount(bool on)
+{
+    Lock lock(this);
+    if (on)
+	m_confTout++;
+    else if (m_confTout)
+	m_confTout--;
+    DDebug(this,DebugAll,"Rooms timeout counter set to %u",m_confTout);
+}
+
 ConferenceDriver::ConferenceDriver()
-    : Driver("conf","misc"), m_handler(0)
+    : Driver("conf","misc"),
+      m_handler(0), m_hangup(0), m_confTout(0)
 {
     Output("Loaded module Conference");
 }
@@ -1064,6 +1478,8 @@ void ConferenceDriver::initialize()
 	return;
     m_handler = new ConfHandler(150);
     Engine::install(m_handler);
+    m_hangup = new HangupHandler(150);
+    Engine::install(m_hangup);
 }
 
 }; // anonymous namespace

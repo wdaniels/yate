@@ -71,13 +71,13 @@ SS7Layer3::SS7Layer3(SS7PointCode::Type type)
 bool SS7Layer3::initialize(const NamedList* config)
 {
     if (config)
-	setNI(SS7MSU::getNetIndicator(config->getValue("netindicator"),SS7MSU::National));
+	setNI(SS7MSU::getNetIndicator(config->getValue(YSTRING("netindicator")),SS7MSU::National));
     if (engine() && !user()) {
 	NamedList params("ss7router");
 	if (config)
-	    static_cast<String&>(params) = config->getValue("router",params);
+	    static_cast<String&>(params) = config->getValue(YSTRING("router"),params);
 	if (params.toBoolean(true))
-	    SS7Layer3::attach(YOBJECT(SS7Router,engine()->build("SS7Router",params,true)));
+	    SS7Layer3::attach(YOBJECT(SS7Router,engine()->build("SS7Router",params,true,false)));
     }
     return true;
 }
@@ -95,7 +95,7 @@ void SS7Layer3::attach(SS7L3User* l3user)
 	const char* name = 0;
 	if (engine() && engine()->find(tmp)) {
 	    name = tmp->toString().safe();
-	    if (tmp->getObject("SS7Router"))
+	    if (tmp->getObject(YSTRING("SS7Router")))
 		(static_cast<SS7Router*>(tmp))->detach(this);
 	    else
 		tmp->attach(0);
@@ -106,7 +106,7 @@ void SS7Layer3::attach(SS7L3User* l3user)
 	return;
     Debug(this,DebugAll,"Attached L3 user (%p,'%s') [%p]",l3user,l3user->toString().safe(),this);
     insert(l3user);
-    if (l3user->getObject("SS7Router"))
+    if (l3user->getObject(YSTRING("SS7Router")))
 	(static_cast<SS7Router*>(l3user))->attach(this);
     else
 	l3user->attach(this);
@@ -182,11 +182,11 @@ bool SS7Layer3::buildRoutes(const NamedList& params)
 	unsigned int prio = 0;
 	unsigned int shift = 0;
 	bool local = false;
-	if (ns->name() == "local")
+	if (ns->name() == YSTRING("local"))
 	    local = true;
-	else if (ns->name() == "route")
+	else if (ns->name() == YSTRING("route"))
 	    prio = 100;
-	else if (ns->name() != "adjacent")
+	else if (ns->name() != YSTRING("adjacent"))
 	    continue;
 	// Get & check the route
 	ObjList* route = ns->split(',',true);
@@ -265,12 +265,7 @@ bool SS7Layer3::maintenance(const SS7MSU& msu, const SS7Label& label, int sls)
 {
     if (msu.getSIF() != SS7MSU::MTN && msu.getSIF() != SS7MSU::MTNS)
 	return false;
-    unsigned int local = getLocal(label.type());
-    if (local && label.dpc().pack(label.type()) != local)
-	return false;
 
-    XDebug(this,DebugStub,"Possibly incomplete SS7Layer3::maintenance(%p,%p,%d) [%p]",
-	&msu,&label,sls,this);
     // Q.707 says test pattern length should be 1-15 but we accept 0 as well
     const unsigned char* s = msu.getData(label.length()+1,2);
     if (!s)
@@ -279,6 +274,16 @@ bool SS7Layer3::maintenance(const SS7MSU& msu, const SS7Label& label, int sls)
     addr << SS7PointCode::lookup(label.type()) << "," << label;
     if (debugAt(DebugAll))
 	addr << " (" << label.opc().pack(label.type()) << ":" << label.dpc().pack(label.type()) << ":" << label.sls() << ")";
+
+    unsigned int local = getLocal(label.type());
+    if (local && label.dpc().pack(label.type()) != local) {
+	Debug(this,DebugMild,"Received MTN %s type %02X length %u %s [%p]",
+	    addr.c_str(),s[0],msu.length(),
+	    (label.opc().pack(label.type()) == local ? "looped back!" : "with invalid DPC"),
+	    this);
+	return false;
+    }
+
     bool badLink = label.sls() != sls;
     if (!badLink) {
 	unsigned int local = getLocal(label.type());
@@ -431,7 +436,7 @@ SS7Route* SS7Layer3::findRoute(SS7PointCode::Type type, unsigned int packed)
 void SS7Layer3::printRoutes()
 {
     String s;
-    bool router = getObject("SS7Router") != 0;
+    bool router = getObject(YSTRING("SS7Router")) != 0;
     for (unsigned int i = 0; i < YSS7_PCTYPE_COUNT; i++) {
 	ObjList* o = m_route[i].skipNull();
 	if (!o)
@@ -495,7 +500,7 @@ SS7MTP3::SS7MTP3(const NamedList& params)
     // Set point code type for each network indicator
     static const unsigned char ni[4] = { SS7MSU::International,
 	SS7MSU::SpareInternational, SS7MSU::National, SS7MSU::ReservedNational };
-    String stype = params.getValue("netind2pctype");
+    String stype = params.getValue(YSTRING("netind2pctype"));
     int level = DebugAll;
     if (stype.find(',') >= 0) {
 	ObjList* obj = stype.split(',',false);
@@ -522,10 +527,10 @@ SS7MTP3::SS7MTP3(const NamedList& params)
     }
     Debug(this,level,"Point code types are '%s' [%p]",stype.safe(),this);
 
-    m_inhibit = !params.getBoolValue("autostart",true);
-    m_checklinks = params.getBoolValue("checklinks",m_checklinks);
-    m_forcealign = params.getBoolValue("forcealign",m_forcealign);
-    int check = params.getIntValue("checkfails",5000);
+    m_inhibit = !params.getBoolValue(YSTRING("autostart"),true);
+    m_checklinks = params.getBoolValue(YSTRING("checklinks"),m_checklinks);
+    m_forcealign = params.getBoolValue(YSTRING("forcealign"),m_forcealign);
+    int check = params.getIntValue(YSTRING("checkfails"),5000);
     if (check > 0) {
 	if (check < 4000)
 	    check = 4000;
@@ -533,7 +538,7 @@ SS7MTP3::SS7MTP3(const NamedList& params)
 	    check = 12000;
 	m_checkT1 = 1000 * check;
     }
-    check = params.getIntValue("maintenance",60000);
+    check = params.getIntValue(YSTRING("maintenance"),60000);
     if (check > 0) {
 	if (check < 30000)
 	    check = 30000;
@@ -563,7 +568,7 @@ SS7MTP3::SS7MTP3(const NamedList& params)
 	}
 	TelEngine::destruct(l);
     }
-    setDumper(params.getValue("layer3dump"));
+    setDumper(params.getValue(YSTRING("layer3dump")));
 }
 
 SS7MTP3::~SS7MTP3()
@@ -791,8 +796,22 @@ bool SS7MTP3::control(Operation oper, NamedList* params)
 {
     bool ok = operational();
     if (params) {
-	m_checklinks = params->getBoolValue("checklinks",m_checklinks);
-	m_forcealign = params->getBoolValue("forcealign",m_forcealign);
+	m_checklinks = params->getBoolValue(YSTRING("checklinks"),m_checklinks);
+	m_forcealign = params->getBoolValue(YSTRING("forcealign"),m_forcealign);
+	const String& inh = (*params)[YSTRING("inhibit")];
+	if (inh) {
+	    // inhibit=slc,[inh_flags][,uninh_flags]
+	    ObjList* l = inh.split(',',true);
+	    if (l && (l->length() == 2 || l->length() == 3)) {
+		int slc = l->at(0)->toString().toInteger(-1);
+		if (slc >= 0) {
+		    int inh = l->at(1)->toString().toInteger(0);
+		    int unh = l->at(2) ? l->at(2)->toString().toInteger(0) : 0;
+		    inhibit(slc,inh,unh);
+		}
+	    }
+	    TelEngine::destruct(l);
+	}
     }
     switch (oper) {
 	case Pause:
@@ -816,7 +835,7 @@ bool SS7MTP3::control(Operation oper, NamedList* params)
 		    SS7Layer3::notify(-1);
 	    }
 	    m_warnDown = true;
-	    if (params && params->getBoolValue("emergency")) {
+	    if (params && params->getBoolValue(YSTRING("emergency"))) {
 		unsigned int cnt = 0;
 		const ObjList* l = &m_links;
 		for (; l; l = l->next()) {
@@ -838,14 +857,14 @@ bool SS7MTP3::control(Operation oper, NamedList* params)
 
 bool SS7MTP3::control(NamedList& params)
 {
-    String* ret = params.getParam("completion");
-    const String* oper = params.getParam("operation");
-    const char* cmp = params.getValue("component");
+    String* ret = params.getParam(YSTRING("completion"));
+    const String* oper = params.getParam(YSTRING("operation"));
+    const char* cmp = params.getValue(YSTRING("component"));
     int cmd = oper ? oper->toInteger(s_dict_control,-1) : -1;
     if (ret) {
 	if (oper && (cmd < 0))
 	    return false;
-	String part = params.getValue("partword");
+	String part = params.getValue(YSTRING("partword"));
 	if (cmp) {
 	    if (toString() != cmp)
 		return false;
@@ -872,17 +891,17 @@ bool SS7MTP3::initialize(const NamedList* config)
     Debug(this,DebugInfo,"SS7MTP3::initialize(%p) [%p]%s",config,this,tmp.c_str());
 #endif
     if (config)
-	debugLevel(config->getIntValue("debuglevel_mtp3",
-	    config->getIntValue("debuglevel",-1)));
+	debugLevel(config->getIntValue(YSTRING("debuglevel_mtp3"),
+	    config->getIntValue(YSTRING("debuglevel"),-1)));
     countLinks();
     m_warnDown = true;
     if (config && (0 == m_total)) {
-	m_checklinks = config->getBoolValue("checklinks",m_checklinks);
-	m_forcealign = config->getBoolValue("forcealign",m_forcealign);
+	m_checklinks = config->getBoolValue(YSTRING("checklinks"),m_checklinks);
+	m_forcealign = config->getBoolValue(YSTRING("forcealign"),m_forcealign);
 	unsigned int n = config->length();
 	for (unsigned int i = 0; i < n; i++) {
 	    NamedString* param = config->getParam(i);
-	    if (!(param && param->name() == "link"))
+	    if (!(param && param->name() == YSTRING("link")))
 		continue;
 	    NamedPointer* ptr = YOBJECT(NamedPointer,param);
 	    NamedList* linkConfig = ptr ? YOBJECT(NamedList,ptr->userData()) : 0;
@@ -913,7 +932,7 @@ bool SS7MTP3::initialize(const NamedList* config)
 		detach(link);
 	    TelEngine::destruct(link);
 	}
-	m_inhibit = !config->getBoolValue("autostart",true);
+	m_inhibit = !config->getBoolValue(YSTRING("autostart"),true);
     }
     SS7Layer3::initialize(config);
     return 0 != m_total;
@@ -1036,16 +1055,21 @@ bool SS7MTP3::receivedMSU(const SS7MSU& msu, SS7Layer2* link, int sls)
     }
 #endif
     bool maint = (msu.getSIF() == SS7MSU::MTN) || (msu.getSIF() == SS7MSU::MTNS);
-    if (link) {
-	if (link->inhibited(SS7Layer2::Unchecked)) {
-	    if (!maint)
-		return false;
-	}
-	if (!maint && (msu.getSIF() != SS7MSU::SNM) &&
-	    link->inhibited(SS7Layer2::Unchecked|SS7Layer2::Inactive|SS7Layer2::Local)) {
-	    Debug(this,DebugMild,"Received MSU on inhibited 0x%02X link %d '%s'",
-		link->inhibited(),sls,link->toString().c_str());
+    if (link && !maint) {
+	int inhibited = link->inhibited() & (SS7Layer2::Unchecked|SS7Layer2::Inactive|SS7Layer2::Local);
+	if (inhibited & SS7Layer2::Unchecked)
 	    return false;
+	if (inhibited && msu.getSIF() != SS7MSU::SNM) {
+	    if (inhibited == SS7Layer2::Inactive) {
+		Debug(this,DebugNote,"Activating inactive link %d '%s' on %s MSU receive",
+		    sls,link->toString().c_str(),msu.getServiceName());
+		link->inhibit(0,SS7Layer2::Inactive);
+	    }
+	    else {
+		Debug(this,DebugMild,"Received MSU on inhibited 0x%02X link %d '%s'",
+		    link->inhibited(),sls,link->toString().c_str());
+		return false;
+	    }
 	}
     }
     // first try to call the user part
@@ -1126,14 +1150,14 @@ bool SS7MTP3::recoveredMSU(const SS7MSU& msu, SS7Layer2* link, int sls)
 
 void SS7MTP3::notify(SS7Layer2* link)
 {
-    Lock lock(this);
+    Lock mylock(this);
     unsigned int chk = m_checked;
     unsigned int act = m_active;
     if (link) {
 	if (link->operational()) {
 	    if (link->inhibited(SS7Layer2::Unchecked)) {
 		// initiate a slightly delayed SLTM check
-		u_int64_t t = Time::now() + 100000 + (::random() % 200000);
+		u_int64_t t = Time::now() + 100000 + (Random::random() % 200000);
 		if ((link->m_checkTime > t) || (t - 2000000 > link->m_checkTime))
 		    link->m_checkTime = t;
 	    }
@@ -1192,8 +1216,8 @@ void SS7MTP3::notify(SS7Layer2* link)
 	}
 	if (cnt)
 	    Debug(this,DebugNote,"Attempted to uninhibit/resume %u links [%p]",cnt,this);
-	SS7Layer3::notify(link ? link->sls() : -1);
 
+	int sls = link ? link->sls() : -1;
 	NamedList notif("");
 	notif.addParam("from", toString());
 	notif.addParam("type","ss7-mtp3");
@@ -1202,6 +1226,9 @@ void SS7MTP3::notify(SS7Layer2* link)
 	notif.addParam("total",String(m_total));
 	notif.addParam("link", link ? link->toString() : "");
 	notif.addParam("linkup", link ? String::boolText(link->operational()) : "");
+
+	mylock.drop();
+	SS7Layer3::notify(sls);
 	engine()->notify(this,notif);
     }
 }

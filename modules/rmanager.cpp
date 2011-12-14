@@ -69,6 +69,12 @@ static const char* s_level[] =
     0
 };
 
+static const char* s_debug[] =
+{
+    "threshold",
+    0
+};
+
 static const char* s_oview[] =
 {
     "overview",
@@ -113,6 +119,7 @@ static const CommandInfo s_cmdInfo[] =
     { "reload", "[plugin]", 0, "Reloads module configuration files" },
     { "restart", "[now]", s_rnow, "Restarts the engine if executing supervised" },
     { "stop", "[exitcode]", 0, "Stops the engine with optionally provided exit code" },
+    { "alias", "[name [command...]]", 0, "Create an alias for a longer command" },
     { 0, 0, 0, 0 }
 };
 
@@ -200,12 +207,13 @@ public:
     virtual void run();
     bool processTelnetChar(unsigned char c);
     bool processChar(unsigned char c);
-    bool processLine(const char *line);
+    bool processLine(const char *line, bool saveLine = true);
     bool autoComplete();
     void errorBeep();
     void clearLine();
     void writeStr(const char *str, int len = -1);
     void writeDebug(const char *str, int level);
+    void writeEvent(const char *str, int level);
     void writeStr(const Message &msg, bool received);
     inline void writeStr(const String &s)
 	{ writeStr(s.safe(),s.length()); }
@@ -215,11 +223,13 @@ public:
 	{ return m_listener->cfg(); }
     void checkTimer(u_int64_t time);
 private:
+    NamedList m_aliases;
     Level m_auth;
     bool m_debug;
     bool m_output;
     bool m_colorize;
     bool m_machine;
+    int m_threshold;
     Socket* m_socket;
     unsigned char m_lastch;
     unsigned char m_escmode;
@@ -394,7 +404,9 @@ Connection* RManagerListener::checkCreate(Socket* sock, const char* addr)
 
 Connection::Connection(Socket* sock, const char* addr, RManagerListener* listener)
     : Thread("RManager Connection"),
+      m_aliases(""),
       m_auth(None), m_debug(false), m_output(false), m_colorize(false), m_machine(false),
+      m_threshold(DebugAll),
       m_socket(sock), m_lastch(0), m_escmode(0), m_echoing(false), m_beeping(false),
       m_timeout(0), m_address(addr), m_listener(listener)
 {
@@ -437,16 +449,27 @@ void Connection::run()
     else {
 	m_auth = cfg().getValue("password") ? User : Admin;
 	m_output = cfg().getBoolValue("output",false);
+	if (Admin == m_auth)
+	    m_debug = cfg().getBoolValue("debug",false);
     }
     String hdr = cfg().getValue("header","YATE ${version}-${release} (http://YATE.null.ro) ready on ${nodename}.");
     Engine::runParams().replaceParams(hdr);
     if (cfg().getBoolValue("telnet",true)) {
+	m_colorize = cfg().getBoolValue("color",false);
 	// WILL SUPPRESS GO AHEAD, WILL ECHO - and enough BS and blanks to hide them
 	writeStr("\377\373\003\377\373\001\r      \b\b\b\b\b\b");
     }
     if (hdr) {
 	writeStr("\r" + hdr + "\r\n");
 	hdr.clear();
+    }
+    NamedIterator iter(cfg());
+    while (const NamedString* s = iter.get()) {
+	if (s->null() || !s->name().startsWith("alias:"))
+	    continue;
+	String name = s->name().substr(6).trimSpaces();
+	if (name)
+	    m_aliases.setParam(name,*s);
     }
     unsigned char buffer[128];
     while (m_socket && m_socket->valid()) {
@@ -615,11 +638,11 @@ bool Connection::processChar(unsigned char c)
 		errorBeep();
 		return false;
 	    }
-	    return processLine("quit");
+	    return processLine("quit",false);
 	case 0x1C: // ^backslash
 	    if (m_buffer)
 		break;
-	    return processLine("reload");
+	    return processLine("reload",false);
 	case 0x05: // ^E
 	    m_escmode = 0;
 	    m_echoing = !m_echoing;
@@ -696,7 +719,7 @@ bool Connection::processChar(unsigned char c)
 	case 0x09: // ^I, TAB
 	    m_escmode = 0;
 	    if (m_buffer.null())
-		return processLine("help");
+		return processLine("help",false);
 	    if (!autoComplete())
 		errorBeep();
 	    return false;
@@ -810,6 +833,11 @@ bool Connection::autoComplete()
 		if (cmd.startsWith(partWord))
 		    m.retValue().append(cmd,"\t");
 	    }
+	    NamedIterator iter(m_aliases);
+	    while (const NamedString* s = iter.get()) {
+		if (s->name().startsWith(partWord))
+		    m.retValue().append(s->name(),"\t");
+	    }
 	}
 	else {
 	    const CommandInfo* info = s_cmdInfo;
@@ -838,9 +866,27 @@ bool Connection::autoComplete()
 	m.addParam("partword",partWord);
     if ((partLine == "status") || (partLine == "debug") || (partLine == "drop"))
 	m.setParam("complete","channels");
-    static const Regexp r("^debug [^ ]\\+$");
-    if (r.matches(partLine))
+    static const Regexp r("^debug \\([^ ]\\+\\)$");
+    if (partLine == "debug")
+	completeWords(m.retValue(),s_debug,partWord);
+    else while (partLine.matches(r)) {
+	String tmp = partLine.matchString(1);
+	const char** lvl = s_level;
+	for (; *lvl; lvl++) {
+	    if (tmp == *lvl)
+		break;
+	}
+	if (*lvl)
+	    break;
+	for (lvl = s_debug; *lvl; lvl++) {
+	    if (tmp == *lvl)
+		break;
+	}
+	if (*lvl)
+	    break;
 	completeWords(m.retValue(),s_level,partWord);
+	break;
+    }
     if (m_auth >= Admin)
 	Engine::dispatch(m);
     if (m.retValue().null())
@@ -879,7 +925,7 @@ bool Connection::autoComplete()
 }
 
 // execute received input line
-bool Connection::processLine(const char *line)
+bool Connection::processLine(const char *line, bool saveLine)
 {
     DDebug("RManager",DebugInfo,"processLine = '%s'",line);
     String str(line);
@@ -887,7 +933,8 @@ bool Connection::processLine(const char *line)
     if (str.null())
 	return false;
 
-    m_lastcmd = str;
+    if (saveLine)
+	m_lastcmd = str;
     line = 0;
     m_buffer.clear();
 
@@ -1105,6 +1152,15 @@ bool Connection::processLine(const char *line)
 	    str >> dbg;
 	    dbg = debugLevel(dbg);
 	}
+	if (str.startSkip("threshold")) {
+	    int thr = m_threshold;
+	    str >> thr;
+	    if (thr < DebugConf)
+		thr = DebugConf;
+	    else if (thr > DebugAll)
+		thr = DebugAll;
+	    m_threshold = thr;
+	}
 	else if (str.isBoolean()) {
 	    str >> m_debug;
 	    if (m_debug)
@@ -1134,11 +1190,13 @@ bool Connection::processLine(const char *line)
 	}
 	if (m_machine) {
 	    str = "%%=debug:level=";
-	    str << debugLevel() << ":local=" << m_debug << "\r\n";
+	    str << debugLevel() << ":local=" << m_debug;
+	    str << ":threshold=" << m_threshold << "\r\n";
 	}
 	else {
 	    str = "Debug level: ";
-	    str << debugLevel() << " local: " << (m_debug ? "on\r\n" : "off\r\n");
+	    str << debugLevel() << " local: " << (m_debug ? "on" : "off");
+	    str << " threshold: " << m_threshold << "\r\n";
 	}
 	writeStr(str);
     }
@@ -1232,8 +1290,54 @@ bool Connection::processLine(const char *line)
 	writeStr(m_machine ? "%%=shutdown\r\n" : "Engine shutting down - bye!\r\n");
 	Engine::halt(code);
     }
+    else if (str.startSkip("alias"))
+    {
+	str.trimSpaces();
+	if (str.null()) {
+	    NamedIterator iter(m_aliases);
+	    while (const NamedString* s = iter.get())
+		str << s->name() << "=" << *s << "\r\n";
+	    writeStr(str);
+	    return false;
+	}
+	int sep = str.find(' ');
+	if (sep > 0) {
+	    String val = str.substr(sep+1);
+	    str = str.substr(0,sep);
+	    m_aliases.setParam(str,val);
+	    writeStr("Alias " + str + " set to: " + val + "\r\n");
+	}
+	else {
+	    m_aliases.clearParam(str);
+	    writeStr("Alias " + str + " removed\r\n");
+	}
+    }
     else
     {
+	str.trimSpaces();
+	int sep = str.find(' ');
+	const String* cmd = m_aliases.getParam(str.substr(0,sep));
+	if (cmd) {
+	    if (!saveLine) {
+		writeStr("Error: possible alias loop in '" + str + "'\r\n");
+		return false;
+	    }
+	    if (sep > 0)
+		str = str.substr(sep+1);
+	    else
+		str.clear();
+	    static const Regexp s_paramSep("^\\([^ ]*\\)\\? *\\([^ ]*\\)\\? *\\([^ ]*\\)\\? *\\([^ ]*\\)\\? *\\([^ ]*\\)\\? *\\([^ ]*\\)\\? *\\([^ ]*\\)\\? *\\([^ ]*\\)\\? *\\([^ ]*\\)\\? *\\([^ ]*\\)\\? *");
+	    str.matches(s_paramSep);
+	    str = str.replaceMatches(*cmd);
+	    for (;;) {
+		sep = str.find("$()");
+		if (sep < 0)
+		    return processLine(str,false);
+		if (processLine(str.substr(0,sep),false))
+		    return true;
+		str = str.substr(sep+3);
+	    }
+	}
 	Message m("engine.command");
 	m.addParam("line",str);
 	if (Engine::dispatch(m))
@@ -1261,28 +1365,33 @@ void Connection::writeStr(const Message &msg, bool received)
 // write debugging messages to the remote console
 void Connection::writeDebug(const char *str, int level)
 {
+    if ((m_debug && (m_threshold >= level)) || (m_output && (level < 0)))
+	writeEvent(str,level);
+}
+
+// unconditionally write an event to the remote console
+void Connection::writeEvent(const char *str, int level)
+{
     if (null(str))
 	return;
-    if (m_debug || (m_output && (level < 0))) {
-	if (m_echoing && m_buffer)
-	    clearLine();
-	const char* col = m_colorize ? debugColor(level) : 0;
-	if (col)
-	    writeStr(col,::strlen(col));
-	int len = ::strlen(str);
-	for (; len > 0; len--) {
-	    if ((unsigned char)str[len-1] >= ' ')
-		break;
-	}
-	writeStr(str,len);
-	writeStr("\r\n",2);
-	if (col)
-	    col = debugColor(-2);
-	if (col)
-	    writeStr(col,::strlen(col));
-	if (m_echoing && m_buffer)
-	    writeStr(m_buffer);
+    if (m_echoing && m_buffer)
+	clearLine();
+    const char* col = m_colorize ? debugColor(level) : 0;
+    if (col)
+	writeStr(col,::strlen(col));
+    int len = ::strlen(str);
+    for (; len > 0; len--) {
+	if ((unsigned char)str[len-1] >= ' ')
+	    break;
     }
+    writeStr(str,len);
+    writeStr("\r\n",2);
+    if (col)
+	col = debugColor(-2);
+    if (col)
+	writeStr(col,::strlen(col));
+    if (m_echoing && m_buffer)
+	writeStr(m_buffer);
 }
 
 // write arbitrary string to the remote console

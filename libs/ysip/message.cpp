@@ -74,7 +74,7 @@ SIPMessage::SIPMessage(const char* _method, const char* _uri, const char* _versi
 	_method,_uri,_version,this);
 }
 
-SIPMessage::SIPMessage(SIPParty* ep, const char* buf, int len)
+SIPMessage::SIPMessage(SIPParty* ep, const char* buf, int len, unsigned int* bodyLen)
     : code(0), body(0), m_ep(ep), m_valid(false),
       m_answer(false), m_outgoing(false), m_ack(false), m_cseq(-1), m_flags(-1)
 {
@@ -88,7 +88,7 @@ SIPMessage::SIPMessage(SIPParty* ep, const char* buf, int len)
     }
     if (len < 0)
 	len = ::strlen(buf);
-    m_valid = parse(buf,len);
+    m_valid = parse(buf,len,bodyLen);
 }
 
 SIPMessage::SIPMessage(const SIPMessage* message, int _code, const char* _reason)
@@ -138,13 +138,16 @@ SIPMessage::SIPMessage(const SIPMessage* original, const SIPMessage* answer)
     if (!hl) {
 	String tmp;
 	tmp << version << "/" << getParty()->getProtoName();
-	tmp << " " << getParty()->getLocalAddr() << ":" << getParty()->getLocalPort();
+	if (getParty()) {
+	    Lock lock(getParty()->mutex());
+	    tmp << " " << getParty()->getLocalAddr() << ":" << getParty()->getLocalPort();
+	}
 	hl = new MimeHeaderLine("Via",tmp);
 	header.append(hl);
     }
     if (answer && (answer->code == 200) && (original->method &= "INVITE")) {
 	String tmp("z9hG4bK");
-	tmp << (int)::random();
+	tmp << (int)Random::random();
 	hl->setParam("branch",tmp);
 	const MimeHeaderLine* co = answer->getHeader("Contact");
 	if (co) {
@@ -210,6 +213,9 @@ void SIPMessage::complete(SIPEngine* engine, const char* user, const char* domai
 	    return;
 	}
     }
+    String partyLAddr;
+    int partyLPort = 0;
+    getParty()->getAddr(partyLAddr,partyLPort,true);
 
     // only set the dialog tag on ACK
     if (isACK()) {
@@ -220,26 +226,30 @@ void SIPMessage::complete(SIPEngine* engine, const char* user, const char* domai
     }
 
     if (!domain)
-	domain = getParty()->getLocalAddr();
+	domain = partyLAddr;
 
     MimeHeaderLine* hl = const_cast<MimeHeaderLine*>(getHeader("Via"));
     if (!hl) {
 	String tmp;
 	tmp << version << "/" << getParty()->getProtoName();
-	tmp << " " << getParty()->getLocalAddr() << ":" << getParty()->getLocalPort();
+	tmp << " " << partyLAddr << ":" << partyLPort;
 	hl = new MimeHeaderLine("Via",tmp);
+	if (isReliable() && 0 == (flags & NoConnReuse))
+	    hl->setParam("alias");
 	if (!((flags & (NotReqRport|RportAfterBranch)) || isAnswer() || isACK()))
 	    hl->setParam("rport");
 	header.append(hl);
     }
     if (!(isAnswer() || hl->getParam("branch"))) {
 	String tmp("z9hG4bK");
-	tmp << (int)::random();
+	tmp << (unsigned int)Random::random();
 	hl->setParam("branch",tmp);
     }
     if (isAnswer()) {
-	if (!(flags & NotSetReceived))
+	if (!(flags & NotSetReceived)) {
+	    Lock lock(getParty()->mutex());
 	    hl->setParam("received",getParty()->getPartyAddr());
+	}
 	const String* rport = hl->getParam("rport");
 	if (rport && rport->null() && !(flags & NotSetRport))
 	    const_cast<String&>(*rport) = getParty()->getPartyPort();
@@ -258,7 +268,7 @@ void SIPMessage::complete(SIPEngine* engine, const char* user, const char* domai
 	    header.append(hl);
 	}
 	if (!hl->getParam("tag"))
-	    hl->setParam("tag",String((int)::random()));
+	    hl->setParam("tag",String((unsigned int)Random::random()));
     }
 
     hl = const_cast<MimeHeaderLine*>(getHeader("To"));
@@ -273,7 +283,7 @@ void SIPMessage::complete(SIPEngine* engine, const char* user, const char* domai
 
     if (!(isAnswer() || getHeader("Call-ID"))) {
 	String tmp;
-	tmp << (int)::random() << "@" << domain;
+	tmp << (unsigned int)Random::random() << "@" << domain;
 	addHeader("Call-ID",tmp);
     }
 
@@ -297,7 +307,7 @@ void SIPMessage::complete(SIPEngine* engine, const char* user, const char* domai
 	addHeader("Max-Forwards",tmp);
     }
 
-    if ((method == "INVITE") && !getHeader("Contact")) {
+    if ((method == YSTRING("INVITE")) && !getHeader("Contact")) {
 	// automatically add a contact field to (re)INVITE and its answers
 	String tmp(user);
 	if (!tmp) {
@@ -308,9 +318,9 @@ void SIPMessage::complete(SIPEngine* engine, const char* user, const char* domai
 	}
 	if (tmp)
 	    tmp = tmp.uriEscape('@',"+?&") + "@";
-	tmp = "<sip:" + tmp; 
-	tmp << getParty()->getLocalAddr() << ":";
-	tmp << getParty()->getLocalPort() << ">";
+	tmp = "<sip:" + tmp;
+	tmp << partyLAddr << ":";
+	tmp << partyLPort << ">";
 	addHeader("Contact",tmp);
     }
 
@@ -369,7 +379,7 @@ bool SIPMessage::parseFirst(String& line)
 	    version = line.matchString(3).toUpper();
 	    DDebug(DebugAll,"got request method='%s' uri='%s' version='%s'",
 		method.c_str(),uri.c_str(),version.c_str());
-	    if (method == "ACK")
+	    if (method == YSTRING("ACK"))
 		m_ack = true;
 	}
 	else {
@@ -380,7 +390,7 @@ bool SIPMessage::parseFirst(String& line)
     return true;
 }
 
-bool SIPMessage::parse(const char* buf, int len)
+bool SIPMessage::parse(const char* buf, int len, unsigned int* bodyLen)
 {
     DDebug(DebugAll,"SIPMessage::parse(%p,%d) [%p]",buf,len,this);
     String* line = 0;
@@ -442,14 +452,42 @@ bool SIPMessage::parse(const char* buf, int len)
 	}
 	line->destruct();
     }
-    if (clen >= 0) {
-	if (clen > len)
-	    Debug("SIPMessage",DebugMild,"Content length is %d but only %d in buffer",clen,len);
-	else if (clen < len) {
-	    DDebug("SIPMessage",DebugInfo,"Got %d garbage bytes after content",len - clen);
-	    len = clen;
+    if (!bodyLen) {
+	if (clen >= 0) {
+	    if (clen > len)
+		Debug("SIPMessage",DebugMild,"Content length is %d but only %d in buffer",clen,len);
+	    else if (clen < len) {
+		DDebug("SIPMessage",DebugInfo,"Got %d garbage bytes after content",len - clen);
+		len = clen;
+	    }
 	}
+	buildBody(buf,len);
     }
+    else
+	*bodyLen = (clen >= 0) ? clen : 0;
+    DDebug(DebugAll,"SIPMessage::parse %d header lines, body %p",
+	header.count(),body);
+    return true;
+}
+
+SIPMessage* SIPMessage::fromParsing(SIPParty* ep, const char* buf, int len, unsigned int* bodyLen)
+{
+    SIPMessage* msg = new SIPMessage(ep,buf,len,bodyLen);
+    if (msg->isValid())
+	return msg;
+    DDebug("SIPMessage",DebugInfo,"Invalid message");
+    msg->destruct();
+    return 0;
+}
+
+// Build message's body. Reset it before
+void SIPMessage::buildBody(const char* buf, int len)
+{
+    TelEngine::destruct(body);
+    if (!buf)
+	return;
+    if (len < 0)
+	len = ::strlen(buf);
     const MimeHeaderLine* cType = getHeader("Content-Type");
     if (cType)
 	body = MimeBody::build(buf,len,*cType);
@@ -467,19 +505,8 @@ bool SIPMessage::parse(const char* buf, int len)
 		body->appendHdr(line);
 	}
     }
-    DDebug(DebugAll,"SIPMessage::parse %d header lines, body %p",
+    DDebug(DebugAll,"SIPMessage::buildBody %d header lines, body %p",
 	header.count(),body);
-    return true;
-}
-
-SIPMessage* SIPMessage::fromParsing(SIPParty* ep, const char* buf, int len)
-{
-    SIPMessage* msg = new SIPMessage(ep,buf,len);
-    if (msg->isValid())
-	return msg;
-    DDebug("SIPMessage",DebugInfo,"Invalid message");
-    msg->destruct();
-    return 0;
 }
 
 const MimeHeaderLine* SIPMessage::getHeader(const char* name) const
@@ -612,15 +639,16 @@ void SIPMessage::setParty(SIPParty* ep)
 {
     if (ep == m_ep)
 	return;
-    if (m_ep)
-	m_ep->deref();
+    if (ep && !ep->ref())
+	ep = 0;
+    XDebug(DebugAll,"SIPMessage::setParty(%p) current=%p [%p]",ep,m_ep,this);
+    SIPParty* tmp = m_ep;
     m_ep = ep;
-    if (m_ep)
-	m_ep->ref();
+    TelEngine::destruct(tmp);
 }
 
 MimeAuthLine* SIPMessage::buildAuth(const String& username, const String& password,
-    const String& meth, const String& uri, bool proxy) const
+    const String& meth, const String& uri, bool proxy, SIPEngine* engine) const
 {
     const char* hdr = proxy ? "Proxy-Authenticate" : "WWW-Authenticate";
     const ObjList* l = &header;
@@ -635,8 +663,23 @@ MimeAuthLine* SIPMessage::buildAuth(const String& username, const String& passwo
 	    MimeHeaderLine::delQuotes(realm);
 	    int par = uri.find(';');
 	    String msguri = uri.substr(0,par);
+	    NamedList qop(TelEngine::c_safe(t->getParam("qop")));
+	    if (qop) {
+		MimeHeaderLine::delQuotes(qop);
+		if (qop == YSTRING("auth")) {
+		    String nc("00000001");
+		    if (engine)
+			engine->ncGet(nc);
+		    qop.addParam("nc",nc);
+		    MD5 md5;
+		    md5 << String((unsigned int)Random::random()) << nc << String(Time::secNow());
+		    qop.addParam("cnonce",md5.hexDigest());
+		}
+		else
+		    continue;
+	    }
 	    String response;
-	    SIPEngine::buildAuth(username,realm,password,nonce,meth,msguri,response);
+	    SIPEngine::buildAuth(username,realm,password,nonce,meth,msguri,response,qop);
 	    MimeAuthLine* auth = new MimeAuthLine(proxy ? "Proxy-Authorization" : "Authorization","Digest");
 	    auth->setParam("username",MimeHeaderLine::quote(username));
 	    auth->setParam("realm",MimeHeaderLine::quote(realm));
@@ -645,21 +688,27 @@ MimeAuthLine* SIPMessage::buildAuth(const String& username, const String& passwo
 	    auth->setParam("response",MimeHeaderLine::quote(response));
 	    auth->setParam("algorithm","MD5");
 	    // copy opaque data as-is, only if present
-	    const NamedString* opaque = t->getParam("opaque");
+	    const NamedString* opaque = t->getParam(YSTRING("opaque"));
 	    if (opaque)
 		auth->setParam(opaque->name(),*opaque);
+	    if (qop) {
+		auth->setParam("qop",MimeHeaderLine::quote(qop));
+		NamedIterator iter(qop);
+		for (const NamedString* ns = 0; 0 != (ns = iter.get());)
+		    auth->setParam(ns->name(),MimeHeaderLine::quote(*ns));
+	    }
 	    return auth;
 	}
     }
     return 0;
 }
 
-MimeAuthLine* SIPMessage::buildAuth(const SIPMessage& original) const
+MimeAuthLine* SIPMessage::buildAuth(const SIPMessage& original, SIPEngine* engine) const
 {
     if (original.getAuthUsername().null())
 	return 0;
     return buildAuth(original.getAuthUsername(),original.getAuthPassword(),
-	original.method,original.uri,(code == 407));
+	original.method,original.uri,(code == 407),engine);
 }
 
 ObjList* SIPMessage::getRoutes() const

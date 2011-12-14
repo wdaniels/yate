@@ -26,6 +26,7 @@
 #include <yatesig.h>
 
 #include <string.h>
+#include <stdio.h>
 
 using namespace TelEngine;
 namespace { // anonymous
@@ -33,6 +34,7 @@ namespace { // anonymous
 class SigChannel;                        // Signalling channel
 class SigDriver;                         // Signalling driver
 class SigTopmost;                        // Keep a topmost non-trunk component
+class OnDemand;                          // On demand component
 class SigCircuitGroup;                   // Used to create a signalling circuit group descendant to set the debug name
 class SigTrunk;                          // Keep a signalling trunk
 class SigSS7Isup;                        // SS7 ISDN User Part call controller
@@ -45,6 +47,8 @@ class SigTrunkThread;                    // Get events and check timeout for tru
 class IsupDecodeHandler;                 // Handler for "isup.decode" message
 class IsupEncodeHandler;                 // Handler for "isup.encode" message
 class SigNotifier;                       // Class for handling received notifications
+class SigSS7Tcap;                        // SS7 TCAP - Transaction Capabilities Application Part
+class SigTCAPUser;                       // Default TCAP user
 
 // The signalling channel
 class SigChannel : public Channel
@@ -109,7 +113,13 @@ private:
     // Set RTP data from circuit to message
     bool addRtp(Message& msg, bool possible = false);
     // Update media type, may have switched to fax
-    bool updateMedia(Message& msg);
+    bool updateMedia(Message& msg, const String& operation);
+    // Initiate change with a list of possible modes
+    bool initiateMedia(Message& msg, SignallingCircuit* cic, String& modes);
+    // Initiate change for a single mode
+    bool initiateMedia(Message& msg, SignallingCircuit* cic, const String& mode, bool mandatory);
+    // Notification from peer channel
+    bool notifyMedia(Message& msg);
     // Update circuit and format in source, optionally in consumer too
     void updateCircuitFormat(SignallingEvent* event, bool consumer);
     // Open or update format source/consumer
@@ -143,6 +153,7 @@ private:
     bool m_ringback;                     // Always provide ringback media
     bool m_rtpForward;                   // Forward RTP
     bool m_sdpForward;                   // Forward SDP (only of rtp forward is enabled)
+    String m_nextModes;                  // Next modes to attempt to set
     Message* m_route;                    // Prepared call.preroute message
     ObjList m_chanDtmf;                  // Postponed (received while routing) chan.dtmf messages
     SignallingEvent* m_callAccdEvent;    // Postponed call accepted event to be sent to remote
@@ -152,6 +163,7 @@ class SigDriver : public Driver
 {
     friend class SigTopmost;
     friend class SigTrunk;               // Needded for appendTrunk() / removeTrunk()
+    friend class OnDemand;               // Needed for Append OnDemand
     friend class SigTrunkThread;         // Needded for clearTrunk()
 public:
     enum Operations {
@@ -160,6 +172,9 @@ public:
 	Unknown     = 0x03,
     };
 
+    enum PrivateRelays {
+	TcapRequest = Private,
+    };
     SigDriver();
     ~SigDriver();
     virtual void initialize();
@@ -194,7 +209,17 @@ public:
     bool initSection(NamedList* sect);
     // Copy outgoing message parameters
     void copySigMsgParams(SignallingEvent* event, const NamedList& params, const char* prePrefix = "o");
+    // Load a trunk's section from data file. Trunk name must be set in list name
+    // Return true if found
+    bool loadTrunkData(NamedList& list);
+    // Save a trunk's section to data file
+    bool saveTrunkData(const NamedList& list);
     static const TokenDict s_operations[];
+    // Append an onDemand component
+    bool appendOnDemand(SignallingComponent* cmp, int type);
+    // Install a relay
+    inline bool requestRelay(int id, const char* name, unsigned priority = 100)
+	{ return installRelay(id,name,priority); }
 private:
     // Handle command complete requests
     virtual bool commandComplete(Message& msg, const String& partLine,
@@ -214,7 +239,7 @@ private:
     // Create or initialize a trunk
     bool initTrunk(NamedList& sect, int type);
     // Get the status of a trunk
-    void status(SigTrunk* trunk, String& retVal, const String& target);
+    void status(SigTrunk* trunk, String& retVal, const String& target, bool details);
     // Append a topmost non-trunk component
     bool appendTopmost(SigTopmost* topmost);
     // Remove a topmost component without deleting it
@@ -223,12 +248,21 @@ private:
     bool initTopmost(NamedList& sect, int type);
     // Get the status of a topmost component
     void status(SigTopmost* topmost, String& retVal);
+    // Initialize an on demand component
+    bool initOnDemand(NamedList& sect, int type);
+    // Get the status on an on demand component
+    void status(OnDemand* cmp, String& retVal);
+    // Destroy OnDemand object that have no reference
+    void checkOnDemand();
 
     SignallingEngine* m_engine;          // The signalling engine
+    String m_dataFile;                   // Trunks data file (protected by m_trunksMutex)
     ObjList m_trunks;                    // Trunk list
     Mutex m_trunksMutex;                 // Lock trunk list operations
     ObjList m_topmost;                   // Topmost non-trunk list
     Mutex m_topmostMutex;                // Lock topmost non-trunk list operations
+    ObjList m_onDemand;                  // List of objects created on demand
+    Mutex m_onDemandMutex;               // Lock the list o objects created on demand
     String m_statusCmd;                  // Prefix for status commands
 };
 
@@ -247,6 +281,20 @@ protected:
 	{ }
 private:
     String m_name;                       // Element name
+};
+
+class OnDemand : public TopMost
+{
+public:
+    inline OnDemand(const char* name)
+	: TopMost(name) { }
+    virtual void status(String& retVal)
+	{ }
+    virtual bool initialize(NamedList& params)
+	{ return true; }
+    virtual bool reInitialize(const NamedList& params) = 0;
+    virtual bool isAlive() = 0;
+    virtual SignallingComponent* get() = 0;
 };
 
 class SigTopmost : public TopMost
@@ -286,6 +334,32 @@ private:
     SS7Layer3* m_linkset;
 };
 
+class SigSCCPUser : public SigTopmost
+{
+    YCLASS(SigSCCPUser,SigTopmost)
+public:
+    inline SigSCCPUser(const char* name)
+	: SigTopmost(name), m_user(0)
+	{ }
+    virtual ~SigSCCPUser();
+    virtual bool initialize(NamedList& params);
+private:
+    SCCPUser* m_user;
+};
+
+class SigSccpGtt : public SigTopmost
+{
+    YCLASS(SigSccpGtt,SigTopmost)
+public:
+    inline SigSccpGtt(const char* name)
+	: SigTopmost(name), m_gtt(0)
+	{ }
+    virtual ~SigSccpGtt();
+    virtual bool initialize(NamedList& params);
+private:
+    GTT* m_gtt;
+};
+
 // MTP Traffic Testing
 class SigTesting : public SigTopmost
 {
@@ -300,6 +374,24 @@ protected:
     virtual void destroyed();
 private:
     SS7Testing* m_testing;
+};
+
+class SigSS7Sccp : public OnDemand
+{
+public:
+    inline SigSS7Sccp(SS7SCCP* sccp)
+	: OnDemand(sccp? sccp->toString() : ""), m_sccp(sccp) { m_sccp->ref(); }
+    virtual ~SigSS7Sccp();
+    virtual bool initialize(NamedList& params)
+	{ return true; }
+    virtual void status(String& retVal);
+    virtual bool isAlive();
+    virtual SignallingComponent* get()
+	{ return m_sccp; }
+    virtual bool reInitialize(const NamedList& params)
+	{ return m_sccp ? m_sccp->initialize(&params) : false; }
+private:
+    SS7SCCP* m_sccp;
 };
 
 // Signalling trunk (Call Controller)
@@ -369,7 +461,7 @@ protected:
     // Set trunk name and type. Append to plugin list
     SigTrunk(const char* name, Type type);
     // Start worker thread. Set error on failure
-    bool startThread(String& error, unsigned long sleepUsec);
+    bool startThread(String& error, unsigned long sleepUsec, int floodLimit);
     // Create/Reload/Release data
     virtual bool create(NamedList& params, String& error) { return false; }
     virtual bool reload(NamedList& params) { return false; }
@@ -455,6 +547,59 @@ private:
     unsigned char m_idleValue;           // Idle value for source multiplexer to fill when no data
 };
 
+class SigSS7Tcap : public SigTopmost
+{
+public:
+    inline SigSS7Tcap(const char* name)
+    : SigTopmost(name), m_tcap(0)
+    { }
+    // Initialize (create or reload) the TCAP component
+    // Return false on failure
+    virtual bool initialize(NamedList& params);
+    // Return the status of this component
+    virtual void status(String& retVal);
+protected:
+    virtual void destroyed();
+private:
+    SS7TCAP* m_tcap;
+};
+
+class MsgTCAPUser : public TCAPUser
+{
+public:
+    inline MsgTCAPUser(const char* name)
+	: TCAPUser(name)
+        { }
+    virtual ~MsgTCAPUser();
+    // Initialize the TCAP user
+    // Return false on failure
+    virtual bool initialize(NamedList& params);
+    virtual bool tcapRequest(NamedList& params);
+    virtual bool tcapIndication(NamedList& params);
+protected:
+    SS7TCAP* tcapAttach();
+    String m_tcapName;
+};
+
+
+class SigTCAPUser : public SigTopmost
+{
+public:
+    inline SigTCAPUser(const char* name)
+	: SigTopmost(name), m_user(0)
+    { }
+    virtual ~SigTCAPUser();
+    // Initialize the TCAP user
+    // Return false on failure
+    virtual bool initialize(NamedList& params);
+    virtual bool tcapRequest(NamedList& params);
+    // Return the status of this component
+    virtual void status(String& retVal);
+protected:
+    MsgTCAPUser* m_user;
+    virtual void destroyed();
+};
+
 // Factory for locally configured components
 class SigFactory : public SignallingFactory
 {
@@ -484,12 +629,23 @@ public:
 	SigSS7M2PA        = 0x21 | SigOnDemand,
 	SigSS7M2UA        = 0x22 | SigOnDemand,
 	SigSS7M3UA        = 0x23 | SigTopMost,
+	SigSS7TCAP        = 0x24 | SigTopMost,
+	SigSS7TCAPANSI    = 0x25 | SigTopMost,
+	SigSS7TCAPITU     = 0x26 | SigTopMost,
+	SigTCAPUser       = 0x27 | SigTopMost,
 	SigISDNIUAClient  = 0x31 | SigDefaults,
 	SigISDNIUAGateway = 0x32 | SigTopMost,
 	SigSS7M2UAClient  = 0x33 | SigDefaults,
 	SigSS7M2UAGateway = 0x34 | SigTopMost,
 	SigSS7M3UAClient  = 0x35 | SigDefaults,
 	SigSS7M3UAGateway = 0x36 | SigTopMost,
+	SigSS7SCCP        = 0x37 | SigOnDemand,
+	SigSCCP           = 0x38 | SigOnDemand,
+	SigSCCPUserDummy  = 0x39 | SigTopMost,
+	SigSccpGtt        = 0x3a | SigTopMost,
+	SigSCCPManagement = 0x3b | SigDefaults,
+	SigSS7ItuSccpManagement  = 0x3c | SigDefaults,
+	SigSS7AnsiSccpManagement = 0x3d | SigDefaults,
 	SigSS7Isup  = SigTrunk::SS7Isup    | SigIsTrunk | SigTopMost,
 	SigSS7Bicc  = SigTrunk::SS7Bicc    | SigIsTrunk | SigTopMost,
 	SigISDNPN   = SigTrunk::IsdnPriNet | SigIsTrunk | SigTopMost,
@@ -607,9 +763,10 @@ class SigTrunkThread : public Thread
 {
     friend class SigTrunk;                // SigTrunk will set m_timeout when needded
 public:
-    inline SigTrunkThread(SigTrunk* trunk, unsigned long sleepUsec)
+    inline SigTrunkThread(SigTrunk* trunk, unsigned long sleepUsec, int floodLimit)
 	: Thread("YSIG Trunk"),
-	  m_trunk(trunk), m_timeout(0), m_sleepUsec(sleepUsec)
+	  m_trunk(trunk), m_timeout(0), m_sleepUsec(sleepUsec),
+	  m_floodEvents(floodLimit)
 	{ }
     virtual ~SigTrunkThread();
     virtual void run();
@@ -617,6 +774,7 @@ private:
     SigTrunk* m_trunk;
     u_int64_t m_timeout;
     unsigned long m_sleepUsec;
+    int m_floodEvents;
 };
 
 
@@ -655,12 +813,47 @@ public:
     virtual void cleanup();
 };
 
+// Implementation for a SCCP Global Title Translator
+class GTTranslator : public GTT
+{
+    YCLASS(GTTranslator,GTT)
+public:
+    GTTranslator(const NamedList& params);
+    virtual ~GTTranslator();
+    virtual NamedList* routeGT(const NamedList& gt, const String& prefix);
+    virtual bool initialize(const NamedList* config);
+    virtual void updateTables(const NamedList& params);
+};
+
+class SCCPUserDummy : public SCCPUser
+{
+    YCLASS(SCCPUserDummy,SCCPUser)
+public:
+    SCCPUserDummy(const NamedList& params);
+
+    virtual ~SCCPUserDummy();
+    virtual HandledMSU receivedData(DataBlock& data, NamedList& params);
+    virtual HandledMSU notifyData(DataBlock& data, NamedList& params);
+    virtual bool managementNotify(SCCP::Type type, NamedList &params);
+protected:
+    int m_ssn;
+};
+
+class SCCPHandler : public MessageHandler
+{
+public:
+    inline SCCPHandler()
+	: MessageHandler("sccp.generate",100) {}
+    virtual bool received(Message& msg);
+};
+
+
 static SigDriver plugin;
 static SigFactory factory;
 static SigNotifier s_notifier;
 static Configuration s_cfg;
-static Configuration s_cfgData;
 static const String s_noPrefixParams = "format,earlymedia";
+static int s_floodEvents = 20;
 
 static const char s_miniHelp[] = "sigdump component [filename]";
 static const char s_fullHelp[] = "Command to dump signalling data to a file";
@@ -685,6 +878,14 @@ const TokenDict SigFactory::s_compNames[] = {
     { "ss7-m3ua-gateway", SigSS7M3UAGateway },
     { "ss7-isup",         SigSS7Isup },
     { "ss7-bicc",         SigSS7Bicc },
+    { "ss7-sccp",         SigSS7SCCP },
+    { "ss7-sccpu-dummy",  SigSCCPUserDummy },
+    { "ss7-sccp-itu-mgm", SigSS7ItuSccpManagement },
+    { "ss7-sccp-ansi-mgm",SigSS7AnsiSccpManagement },
+    { "ss7-gtt",          SigSccpGtt },
+    { "ss7-tcap-ansi",    SigSS7TCAPANSI },
+    { "ss7-tcap-itu",     SigSS7TCAPITU },
+    { "ss7-tcap-user",    SigTCAPUser },
     { "isdn-pri-net",     SigISDNPN },
     { "isdn-bri-net",     SigISDNBN },
     { "isdn-pri-cpe",     SigISDNPC },
@@ -717,6 +918,16 @@ const TokenDict SigFactory::s_compClass[] = {
     MAKE_CLASS(SS7M3UAClient),
     MAKE_CLASS(SS7Isup),
     MAKE_CLASS(SS7Bicc),
+    MAKE_CLASS(SS7SCCP),
+    MAKE_CLASS(SCCP),
+    MAKE_CLASS(SCCPManagement),
+    MAKE_CLASS(SS7ItuSccpManagement),
+    MAKE_CLASS(SS7AnsiSccpManagement),
+    MAKE_CLASS(SCCPUserDummy),
+    MAKE_CLASS(SS7TCAP),
+    MAKE_CLASS(SS7TCAPANSI),
+    MAKE_CLASS(SS7TCAPITU),
+    MAKE_CLASS(TCAPUser),
     MAKE_CLASS(ISDNPN),
     MAKE_CLASS(ISDNBN),
     MAKE_CLASS(ISDNPC),
@@ -786,6 +997,36 @@ SignallingComponent* SigFactory::create(const String& type, const NamedList& nam
 	    return new SS7Management(*config);
 	case SigSS7Testing:
 	    return new SS7Testing(*config);
+	case SigSCCP:
+	    if (ty && *ty != YSTRING("ss7-sccp"))
+		return 0;
+	case SigSS7SCCP:
+	{
+	    SS7SCCP* sccp = new SS7SCCP(*config);
+	    plugin.appendOnDemand(sccp, SigSS7SCCP);
+	    return sccp;
+	}
+	case SigSCCPManagement:
+	    if (!ty)
+		return 0;
+	    if (*ty == "ss7-sccp-itu-mgm")
+		return new SS7ItuSccpManagement(*config);
+	    else if (*ty == "ss7-sccp-ansi-mgm")
+		return new SS7AnsiSccpManagement(*config);
+	    else
+		return 0;
+	case SigSS7ItuSccpManagement:
+	    return new SS7ItuSccpManagement(*config);
+	case SigSS7AnsiSccpManagement:
+	    return new SS7AnsiSccpManagement(*config);
+	case SigSS7TCAP:
+	    if (ty) {
+		if (*ty == "ss7-tcap-ansi")
+		    return new SS7TCAPANSI(*config);
+		if (*ty == "ss7-tcap-itu")
+		    return new SS7TCAPITU(*config);
+	    }
+	    return 0;
     }
     return 0;
 }
@@ -941,10 +1182,19 @@ bool SigChannel::startCall(Message& msg, String& trunks)
 	    else
 		cic->setParam("echocancel",String::boolText(echo->toBoolean(true)));
 	}
-	m_rtpForward = cic->getBoolParam("rtp_forward") && msg.getBoolValue("rtp_forward");
-	if (m_rtpForward) {
-	    m_sdpForward = (0 != msg.getParam("sdp_raw"));
-	    msg.setParam("rtp_forward","accepted");
+	const char* rfc2833 = msg.getValue("rfc2833");
+	if (rfc2833)
+	    cic->setParam("rtp_rfc2833",rfc2833);
+	if (msg.getBoolValue("rtp_forward")) {
+	    m_rtpForward = cic->getBoolParam("rtp_forward");
+	    if (m_rtpForward) {
+		m_sdpForward = (0 != msg.getParam("sdp_raw"));
+		msg.setParam("rtp_forward","accepted");
+	    }
+	}
+	else {
+	    m_rtpForward = false;
+	    cic->setParam("rtp_forward",String::boolText(false));
 	}
     }
     setMaxcall(msg);
@@ -978,8 +1228,10 @@ bool SigChannel::startCall(Message& msg, SigTrunk* trunk)
     else
 	sigMsg->params().copyParam(msg,"callerpres");
     sigMsg->params().copyParam(msg,"callerscreening");
+    sigMsg->params().copyParam(msg,"complete");
     sigMsg->params().copyParam(msg,"callednumtype");
     sigMsg->params().copyParam(msg,"callednumplan");
+    sigMsg->params().copyParam(msg,"inn");
     sigMsg->params().copyParam(msg,"calledpointcode");
     // Copy RTP parameters
     if (msg.getBoolValue("rtp_forward")) {
@@ -989,12 +1241,13 @@ bool SigChannel::startCall(Message& msg, SigTrunk* trunk)
     }
     // Copy routing params
     unsigned int n = msg.length();
-    String prefix;
-    prefix << plugin.debugName() << ".";
+    String prefix = msg.getValue("osig-prefix");
+    if (prefix.null())
+	prefix << plugin.debugName() << ".";
     for (unsigned int i = 0; i < n; i++) {
 	NamedString* ns = msg.getParam(i);
 	if (ns && ns->name().startsWith(prefix))
-	    sigMsg->params().addParam(ns->name().substr(prefix.length()),*ns);
+	    sigMsg->params().setParam(ns->name().substr(prefix.length()),*ns);
     }
     Debug(this,DebugAll,"Trying to call on trunk '%s' [%p]",
 	trunk->name().safe(),this);
@@ -1186,8 +1439,17 @@ bool SigChannel::msgUpdate(Message& msg)
 	releaseCallAccepted(true);
 	return true;
     }
-    else if (oper == "request")
-	return updateMedia(msg);
+    else if (oper == "request" || oper == "reject")
+	return updateMedia(msg,oper);
+    else if (oper == "initiate") {
+	if (updateMedia(msg,oper))
+	    return true;
+	Debug(this,DebugMild,"No media update: %s",msg.getValue("reason"));
+	return false;
+    }
+    else if (oper == "notify")
+	return notifyMedia(msg);
+
     if (SignallingEvent::Unknown == evt)
 	return Channel::msgUpdate(msg);
     Lock lock(m_mutex);
@@ -1261,8 +1523,12 @@ void SigChannel::callAccept(Message& msg)
     m_ringback = msg.getBoolValue("ringback",m_ringback);
     if (m_rtpForward) {
 	const String* tmp = msg.getParam("rtp_forward");
-	if (!(tmp && (*tmp == "accepted")))
+	if (!(tmp && (*tmp == "accepted"))) {
 	    m_rtpForward = false;
+	    SignallingCircuit* cic = getCircuit();
+	    if (cic)
+		cic->setParam("rtp_forward",String::boolText(false));
+	}
     }
     setState("accepted",false);
     lock.drop();
@@ -1307,9 +1573,11 @@ void SigChannel::endDisconnect(const Message& params, bool handled)
     const char* prefix = params.getValue("message-oprefix");
     if (TelEngine::null(prefix))
 	return;
+    paramMutex().lock();
     parameters().clearParams();
     parameters().setParam("message-oprefix",prefix);
     parameters().copySubParams(params,prefix,false);
+    paramMutex().unlock();
 }
 
 void SigChannel::hangup(const char* reason, SignallingEvent* event, const NamedList* extra)
@@ -1335,13 +1603,19 @@ void SigChannel::hangup(const char* reason, SignallingEvent* event, const NamedL
 	ev = new SignallingEvent(SignallingEvent::Release,msg,m_call);
 	TelEngine::destruct(msg);
 	TelEngine::destruct(m_call);
-	if (!extra)
-	    extra = &parameters();
-	plugin.copySigMsgParams(ev,*extra,"i");
+	if (extra)
+	    plugin.copySigMsgParams(ev,*extra,"i");
+	else {
+	    paramMutex().lock();
+	    plugin.copySigMsgParams(ev,parameters(),"i");
+	    paramMutex().unlock();
+	}
     }
     if (event) {
+	paramMutex().lock();
 	parameters().clearParams();
 	plugin.copySigMsgParams(parameters(),event,&params);
+	paramMutex().unlock();
     }
     lock2.drop();
     lock.drop();
@@ -1502,6 +1776,7 @@ void SigChannel::evCircuit(SignallingEvent* event)
 		bool inband = ev->getBoolValue("inband");
 		Message* msg = message("call.fax",false,true);
 		msg->setParam("detected",(inband ? "inband" : "signal"));
+		msg->setParam("rtp_forward",String::boolText(m_rtpForward));
 		plugin.copySigMsgParams(*msg,event,&s_noPrefixParams);
 		Engine::enqueue(msg);
 		break;
@@ -1562,7 +1837,8 @@ bool SigChannel::addRtp(Message& msg, bool possible)
     return ok;
 }
 
-bool SigChannel::updateMedia(Message& msg)
+// Update media from call.update message
+bool SigChannel::updateMedia(Message& msg, const String& operation)
 {
     bool hadRtp = !m_rtpForward;
     bool rtpFwd = msg.getBoolValue("rtp_forward",m_rtpForward);
@@ -1577,22 +1853,119 @@ bool SigChannel::updateMedia(Message& msg)
 	msg.setParam("reason","Circuit missing or not connected");
 	return false;
     }
-    String tmp = msg;
-    msg = "rtp";
-    bool ok = cic->setParams(msg) && cic->status(SignallingCircuit::Connected,true);
-    msg = tmp;
-    if (!ok) {
+    if (operation == "request") {
+	String tmp = msg;
+	msg = "rtp";
+	bool ok = cic->setParams(msg) && cic->status(SignallingCircuit::Connected,true);
+	msg = tmp;
+	if (!ok) {
+	    msg.setParam("error","failure");
+	    msg.setParam("reason","Circuit does not support media change");
+	    return false;
+	}
+	m_rtpForward = cic->getBoolParam("rtp_forward");
+	if (m_rtpForward && hadRtp)
+	    clearEndpoint();
+	Message* m = message("call.update",false,true);
+	m->addParam("operation","notify");
+	cic->getParams(*m,"rtp");
+	return Engine::enqueue(m);
+    }
+    else if (operation == "initiate") {
+	String modes = msg.getValue("mode");
+	if (modes.null()) {
+	    bool audio = msg.getBoolValue("media",true);
+	    if (msg.getBoolValue("media_image",!audio))
+		modes = audio ? "t38,fax" : "t38";
+	    else if (audio)
+		modes = "fax";
+	}
+	if (modes.null())
+	    return false;
+	if (!cic->setParam("rtp_forward",String::boolText(rtpFwd))) {
+	    msg.setParam("error","failure");
+	    msg.setParam("reason","Circuit does not support RTP forward");
+	    return false;
+	}
+	m_rtpForward = cic->getBoolParam("rtp_forward");
+	if (m_rtpForward && hadRtp)
+	    clearEndpoint();
+	m_nextModes.clear();
+	if (initiateMedia(msg,cic,modes))
+	    return true;
+	msgDrop(msg,"nomedia");
+    }
+    else if (operation == "reject") {
+	if (initiateMedia(msg,cic,m_nextModes))
+	    return true;
+	msgDrop(msg,"nomedia");
+    }
+    return false;
+}
+
+// Attempt to initiate media change from a list of modes
+bool SigChannel::initiateMedia(Message& msg, SignallingCircuit* cic, String& modes)
+{
+    while (modes) {
+	String mode;
+	int pos = modes.find(',');
+	if (pos > 0) {
+	    mode = modes.substr(0,pos);
+	    modes = modes.substr(pos+1);
+	}
+	else if (pos < 0) {
+	    mode = modes;
+	    modes.clear();
+	}
+	else {
+	    modes = modes.substr(1);
+	    continue;
+	}
+	if (initiateMedia(msg,cic,mode,modes.null())) {
+	    m_nextModes = modes;
+	    return true;
+	}
+    }
+    return false;
+}
+
+// Attempt to initiate media change for a single mode
+bool SigChannel::initiateMedia(Message& msg, SignallingCircuit* cic,
+    const String& mode, bool mandatory)
+{
+    DDebug(this,DebugAll,"Attempting to initiate mode '%s'",mode.c_str());
+    if (!(cic->setParam("special_mode",mode) &&
+	cic->status(SignallingCircuit::Connected,true))) {
 	msg.setParam("error","failure");
 	msg.setParam("reason","Circuit does not support media change");
 	return false;
     }
-    m_rtpForward = cic->getBoolParam("rtp_forward");
-    if (m_rtpForward && hadRtp)
-	clearEndpoint();
-    Message* m = message("call.update",false,true);
-    m->addParam("operation","notify");
-    cic->getParams(*m,"rtp");
-    return Engine::enqueue(m);
+    Message m("call.update");
+    complete(m);
+    m.addParam("operation","request");
+    m.addParam("mandatory",String::boolText(mandatory));
+    cic->getParams(m,"rtp");
+    if (!Engine::dispatch(m))
+	return false;
+    msg.clearParam("error");
+    msg.clearParam("reason");
+    return true;
+}
+
+bool SigChannel::notifyMedia(Message& msg)
+{
+    if (!(m_rtpForward && msg.getBoolValue("rtp_forward")))
+	return false;
+    RefPointer<SignallingCircuit> cic = getCircuit();
+    if (!(cic && cic->connected()))
+	return false;
+    String tmp = msg;
+    msg = "rtp";
+    bool ok = cic->setParams(msg) && cic->status(SignallingCircuit::Connected,true);
+    msg = tmp;
+    if (ok)
+	m_nextModes.clear();
+    return ok;
 }
 
 void SigChannel::updateCircuitFormat(SignallingEvent* event, bool consumer)
@@ -1718,7 +2091,7 @@ SigDriver::SigDriver()
     : Driver("sig","fixchans"),
     m_engine(0),
     m_trunksMutex(true,"SigDriver::trunks"),
-    m_topmostMutex(true,"SigDriver::topmost")
+    m_topmostMutex(true,"SigDriver::topmost"), m_onDemandMutex(true,"SigDriver::ondemand")
 {
     Output("Loaded module Signalling Channel");
     m_statusCmd << "status " << name();
@@ -1732,6 +2105,10 @@ SigDriver::~SigDriver()
     m_topmostMutex.lock();
     m_topmost.clear();
     m_topmostMutex.unlock();
+    // Clear OnDemand components
+    m_onDemandMutex.lock();
+    m_onDemand.clear();
+    m_onDemandMutex.unlock();
     if (m_engine)
 	delete m_engine;
 }
@@ -1813,6 +2190,14 @@ bool SigDriver::received(Message& msg, int id)
 	    if (m_engine && m_engine->control(msg))
 		return true;
 	    return Driver::received(msg,id);
+	case TcapRequest:
+	    {
+		target = msg.getValue(YSTRING("tcap.user"));
+		m_topmostMutex.lock();
+		RefPointer<SigTCAPUser> user = static_cast<SigTCAPUser*>(m_topmost[target]);
+		m_topmostMutex.unlock();
+		return (user && user->tcapRequest(msg));
+	    }
 	case Halt:
 	    clearTrunk();
 	    if (m_engine)
@@ -1887,7 +2272,7 @@ bool SigDriver::received(Message& msg, int id)
     RefPointer<SigTrunk> trunk = findTrunk(trunkName,false);
     m_trunksMutex.unlock();
     if (trunk) {
-	status(trunk,msg.retValue(),target);
+	status(trunk,msg.retValue(),target,msg.getBoolValue(YSTRING("details"),true));
 	return true;
     }
     m_topmostMutex.lock();
@@ -1897,40 +2282,106 @@ bool SigDriver::received(Message& msg, int id)
 	status(topmost,msg.retValue());
 	return true;
     }
+    m_onDemandMutex.lock();
+    ObjList* o = m_onDemand.find(trunkName);
+    RefPointer<OnDemand> cmp = 0;
+    if (o)
+	cmp = static_cast<OnDemand*>(o->get());
+    m_onDemandMutex.unlock();
+    if (cmp) {
+	status(cmp,msg.retValue());
+	return true;
+    }
     return false;
 }
 
-void SigDriver::status(SigTrunk* trunk, String& retVal, const String& target)
+// Utility used in status
+static void countCic(SignallingCircuit* cic, unsigned int& avail, unsigned int& resetting,
+    unsigned int& locked)
 {
+    if (!cic->locked(SignallingCircuit::LockLockedBusy))
+	avail++;
+    else {
+	if (cic->locked(SignallingCircuit::Resetting))
+	    resetting++;
+	if (cic->locked(SignallingCircuit::LockLocked))
+	    locked++;
+    }
+}
+
+void SigDriver::status(SigTrunk* trunk, String& retVal, const String& target, bool details)
+{
+    bool all = target.null();
     String detail;
+    String ctrlStatus = "Unknown";
     unsigned int circuits = 0;
+    unsigned int calls = 0;
     unsigned int count = 0;
+    int singleCic = false;
+    unsigned int availableCics = 0;
+    unsigned int resettingCics = 0;
+    unsigned int lockedCics = 0;
     while (true) {
 	SignallingCallControl* ctrl = trunk ? trunk->controller() : 0;
 	if (!ctrl)
 	    break;
 	Lock lckCtrl(ctrl);
-
-	if (ctrl->circuits())
-	    circuits = ctrl->circuits()->count();
-	else
+	ctrlStatus = ctrl->statusName();
+	if (!ctrl->circuits()) {
+	    // Count now the number of calls. It should be 0 !!!
+	    calls = ctrl->calls().count();
 	    break;
-
+	}
 	SignallingCircuitRange range(target,0);
-	if (target == "*" || target == "all")
+	SignallingCircuitRange* rptr = &range;
+	if (target == "*" || target == "all") {
 	    range.add(ctrl->circuits()->base(),ctrl->circuits()->last());
-	for (unsigned int i = 0; i < range.count(); i++) {
-	    SignallingCircuit* cic = ctrl->circuits()->find(range[i]);
+	    all = true;
+	}
+	else if (range.count() == 0)
+	    rptr = ctrl->circuits()->findRange(target);
+	else
+	    singleCic = (range.count() == 1) && (-1 != target.toInteger(-1));
+	// Count calls, circuits and circuit status if complete status was requested
+	if (all) {
+	    calls = ctrl->calls().count();
+	    ObjList* o = ctrl->circuits()->circuits().skipNull();
+	    for (; o; o = o->skipNext()) {
+		circuits++;
+		SignallingCircuit* cic = static_cast<SignallingCircuit*>(o->get());
+		countCic(cic,availableCics,resettingCics,lockedCics);
+	    }
+	}
+	for (unsigned int i = 0; rptr && i < rptr->count(); i++) {
+	    SignallingCircuit* cic = ctrl->circuits()->find((*rptr)[i]);
 	    if (!cic)
 		continue;
 	    count++;
-	    detail.append(String(cic->code()) + "=",",");
-	    if (cic->span())
-		detail << cic->span()->id();
-	    detail << "|" << SignallingCircuit::lookupStatus(cic->status());
-	    detail << "|" << String::boolText(0 != cic->locked(SignallingCircuit::LockLocal));
-	    detail << "|" << String::boolText(0 != cic->locked(SignallingCircuit::LockRemote));
-	    detail << "|" << String::boolText(0 != cic->locked(SignallingCircuit::LockChanged|SignallingCircuit::Resetting));
+	    if (!singleCic) {
+		if (!all)
+		    countCic(cic,availableCics,resettingCics,lockedCics);
+		if (!details)
+		    continue;
+		detail.append(String(cic->code()) + "=",",");
+		if (cic->span())
+		    detail << cic->span()->id();
+		detail << "|" << SignallingCircuit::lookupStatus(cic->status());
+		detail << "|" << String::boolText(0 != cic->locked(SignallingCircuit::LockLocal));
+		detail << "|" << String::boolText(0 != cic->locked(SignallingCircuit::LockRemote));
+		detail << "|" << String::boolText(0 != cic->locked(SignallingCircuit::LockChanged|SignallingCircuit::Resetting));
+	    }
+	    else {
+		detail.append("circuit=",",");
+		detail << cic->code();
+		detail << ",span=" << (cic->span() ? cic->span()->id() : String::empty());
+		detail << ",status=" << SignallingCircuit::lookupStatus(cic->status());
+		detail << ",lockedlocal=" << String::boolText(0 != cic->locked(SignallingCircuit::LockLocal));
+		detail << ",lockedremote=" << String::boolText(0 != cic->locked(SignallingCircuit::LockRemote));
+		detail << ",changing=" << String::boolText(0 != cic->locked(SignallingCircuit::LockChanged|SignallingCircuit::Resetting));
+		char tmp[9];
+		::sprintf(tmp,"%x",cic->locked(-1));
+		detail << ",flags=0x" << tmp;
+	    }
 	}
 	break;
     }
@@ -1939,14 +2390,23 @@ void SigDriver::status(SigTrunk* trunk, String& retVal, const String& target)
     retVal << "module=" << name();
     retVal << ",trunk=" << trunk->name();
     retVal << ",type=" << lookup(trunk->type(),SigTrunk::s_type);
-    retVal << ",circuits=" << circuits;
-    retVal << ",status=" << (trunk->controller() ? trunk->controller()->statusName() : "Unknown");
-    retVal << ",calls=" << (trunk->controller() ? trunk->controller()->calls().count() : 0);
-    if (!target.null()) {
-	retVal << ";count=" << count;
-	retVal << ",format=Span|Status|LockedLocal|LockedRemote|Changing";
-	retVal << ";" << detail;
+    if (!singleCic) {
+	if (target)
+	    retVal << ",format=Span|Status|LockedLocal|LockedRemote|Changing";
+	if (all) {
+	    retVal << ";circuits=" << circuits;
+	    retVal << ",status=" << ctrlStatus;
+	    retVal << ",calls=" << calls;
+	}
+	else
+	    retVal << ";status=" << ctrlStatus;
+	retVal << ",available=" << availableCics;
+	retVal << ",resetting=" << resettingCics;
+	retVal << ",locked=" << lockedCics;
+	if (target)
+	    retVal << ",count=" << count;
     }
+    retVal.append(detail,";");
     retVal << "\r\n";
 }
 
@@ -1961,6 +2421,35 @@ void SigDriver::status(SigTopmost* topmost, String& retVal)
     if (!details.null())
 	retVal << "," << details;
     retVal << "\r\n";
+}
+
+void SigDriver::status(OnDemand* cmp, String& retVal)
+{
+    retVal.clear();
+    retVal << "module=" << name();
+    retVal << ",component=" << cmp->name();
+    String details = "";
+    cmp->status(details);
+    if (!details.null())
+	retVal << "," << details;
+    retVal << "\r\n";
+}
+
+void SigDriver::checkOnDemand()
+{
+    Lock lock(m_onDemandMutex);
+    ObjList remove;
+    ListIterator iter(m_onDemand);
+    GenObject* obj = 0;
+    while ((obj = iter.get())) {
+	OnDemand* cmp = static_cast<OnDemand*>(obj);
+	if (!cmp)
+	    continue;
+	Lock lock1(m_engine);
+	if (cmp->isAlive())
+	    continue;
+	m_onDemand.remove(cmp);
+    }
 }
 
 void SigDriver::handleEvent(SignallingEvent* event)
@@ -2199,6 +2688,10 @@ bool SigDriver::commandComplete(Message& msg, const String& partLine,
 	for (o = m_topmost.skipNull(); o; o = o->skipNext())
 	    itemComplete(msg.retValue(),static_cast<SigTopmost*>(o->get())->name(),partWord);
 	m_topmostMutex.unlock();
+	m_onDemandMutex.lock();
+	for (o = m_onDemand.skipNull(); o; o = o->skipNext())
+	    itemComplete(msg.retValue(),static_cast<OnDemand*>(o->get())->name(),partWord);
+	m_onDemandMutex.unlock();
 	return true;
     }
 
@@ -2270,6 +2763,42 @@ bool SigDriver::commandHelp(String& retVal, const String& line)
     }
     return false;
 }
+
+bool SigDriver::appendOnDemand(SignallingComponent* cmp, int type)
+{
+    if (!cmp)
+	return false;
+    if (type != SigFactory::SigSS7SCCP)
+	return false;
+    SS7SCCP* sccp = YOBJECT(SS7SCCP,cmp);
+    if (!sccp)
+	return false;
+    Lock lock(m_onDemandMutex);
+    if (m_onDemand.find(sccp->toString())) {
+	Debug(this,DebugGoOn,"Request to append duplicat of on demand component (%p): '%s'.",
+	    cmp,cmp->toString().c_str());
+	return false;
+    }
+    SigSS7Sccp* dsccp = new SigSS7Sccp(sccp);
+    m_onDemand.append(dsccp);
+    DDebug(this,DebugAll,"On Demand (%p): '%s' added",cmp,cmp->toString().c_str());
+    return true;
+}
+
+bool SigDriver::initOnDemand(NamedList& sect, int type)
+{
+    Lock lock(m_onDemandMutex);
+    ObjList* ret = m_onDemand.find(sect);
+    if (!ret) {
+	DDebug(this,DebugAll,"Can not find on demand component %s. Must not be needed.",sect.c_str());
+	return true;
+    }
+    OnDemand* cmp = static_cast<OnDemand*>(ret->get());
+    if (!cmp)
+	return false;
+    return cmp->reInitialize(sect);
+}
+
 
 // Append a topmost component to the list. Duplicate names are not allowed
 bool SigDriver::appendTopmost(SigTopmost* topmost)
@@ -2423,6 +2952,19 @@ bool SigDriver::initTopmost(NamedList& sect, int type)
 	    case SigFactory::SigSS7Testing:
 		topmost = new SigTesting(sect);
 		break;
+	    case SigFactory::SigSCCPUserDummy:
+		topmost =  new SigSCCPUser(sect);
+		break;
+	    case SigFactory::SigSccpGtt:
+		topmost = new SigSccpGtt(sect);
+		break;
+	    case SigFactory::SigSS7TCAPANSI:
+	    case SigFactory::SigSS7TCAPITU:
+		topmost = new SigSS7Tcap(sect);
+		break;
+	    case SigFactory::SigTCAPUser:
+		topmost = new SigTCAPUser(sect);
+		break;
 	    default:
 		return false;
 	}
@@ -2466,6 +3008,7 @@ bool SigDriver::reInitialize(NamedList& params)
     SignallingComponent* router = 0;
     while ((router = engine()->find("","SS7Router",router)))
 	YOBJECT(SS7Router,router)->printRoutes();
+    checkOnDemand();
     return ret;
 }
 
@@ -2528,11 +3071,12 @@ void SigDriver::initialize()
     Lock2 lock(m_trunksMutex,m_topmostMutex);
     s_cfg = Engine::configFile("ysigchan");
     s_cfg.load();
+    m_dataFile = s_cfg.getValue("general","datafile",Engine::configFile("ysigdata"));
+    Engine::self()->runParams().replaceParams(m_dataFile);
+    s_floodEvents = s_cfg.getIntValue("general","floodevents",20);
     // Startup
+    setup();
     if (!m_engine) {
-	s_cfgData = Engine::configFile("ysigdata");
-	s_cfgData.load(false);
-	setup();
 	installRelay(Masquerade);
 	installRelay(Halt);
 	installRelay(Help);
@@ -2541,6 +3085,7 @@ void SigDriver::initialize()
 	installRelay(Route);
 	Engine::install(new IsupDecodeHandler);
 	Engine::install(new IsupEncodeHandler);
+	Engine::install(new SCCPHandler);
 	m_engine = SignallingEngine::self(true);
 	m_engine->debugChain(this);
 	m_engine->start();
@@ -2562,6 +3107,7 @@ void SigDriver::initialize()
     SignallingComponent* router = 0;
     while ((router = engine()->find("","SS7Router",router)))
 	YOBJECT(SS7Router,router)->printRoutes();
+    checkOnDemand();
 }
 
 bool SigDriver::initSection(NamedList* sect)
@@ -2580,7 +3126,44 @@ bool SigDriver::initSection(NamedList* sect)
 	ret = initTrunk(*sect,type & SigFactory::SigPrivate);
     else if (type & SigFactory::SigTopMost)
 	ret = initTopmost(*sect,type);
+    else if (type & SigFactory::SigOnDemand)
+	ret = initOnDemand(*sect,type);
     return ret;
+}
+
+// Load a trunk's section from data file. Return true if found
+bool SigDriver::loadTrunkData(NamedList& list)
+{
+    if (!list)
+	return false;
+    Lock lock(m_trunksMutex);
+    Configuration data(m_dataFile);
+    data.load(false);
+    NamedList* sect = data.getSection(list);
+    if (sect)
+	list.copyParams(*sect);
+    return sect != 0;
+}
+
+// Save a trunk's section to data file
+bool SigDriver::saveTrunkData(const NamedList& list)
+{
+    if (!list)
+	return false;
+    Lock lock(m_trunksMutex);
+    Configuration data(m_dataFile);
+    data.load(false);
+    data.clearSection(list);
+    unsigned int n = list.count();
+    if (n) {
+	NamedList* tmp = data.createSection(list);
+	tmp->copyParams(list);
+    }
+    if (data.save()) {
+	Debug(this,DebugAll,"Saved trunk '%s' data (%u items)",list.c_str(),n);
+	return true;
+    }
+    return false;
 }
 
 
@@ -2623,7 +3206,7 @@ bool SigLinkSet::initialize(NamedList& params)
 void SigLinkSet::status(String& retVal)
 {
     retVal << "type=" << (m_linkset ? m_linkset->componentType() : "");
-    retVal << ",status=" << (m_linkset && m_linkset->operational() ? "" : "non-") << "operational";
+    retVal << ";status=" << (m_linkset && m_linkset->operational() ? "" : "non-") << "operational";
 }
 
 void SigLinkSet::ifStatus(String& status)
@@ -2667,6 +3250,86 @@ void SigLinkSet::linkStatus(String& status)
 	    }
 	}
     }
+}
+
+/**
+ * SigSS7ccp
+ */ 
+
+SigSS7Sccp::~SigSS7Sccp()
+{
+    if (m_sccp) {
+	if (m_sccp->refcount() > 1)
+	    Debug(&plugin,DebugWarn,"Removing alive OnDemand component '%s' [%p]",
+		  name().c_str(),this);
+	TelEngine::destruct(m_sccp);
+	m_sccp = 0;
+    }
+}
+
+void SigSS7Sccp::status(String& retVal)
+{
+    if (!m_sccp)
+	return;
+    retVal << "type=" << m_sccp->componentType();
+    retVal << ";sent=" << m_sccp->messagesSend();
+    retVal << ",received=" <<  m_sccp->messagesReceived();
+    retVal << ",translations=" <<  m_sccp->translations();
+    retVal << ",errors=" <<  m_sccp->errors();
+}
+
+bool SigSS7Sccp::isAlive()
+{
+    return m_sccp && m_sccp->refcount() > 1;
+}
+
+/**
+ * SigSCCPUser
+ */
+
+SigSCCPUser::~SigSCCPUser()
+{
+    if (m_user) {
+	plugin.engine()->remove(m_user);
+	TelEngine::destruct(m_user);
+    }
+}
+
+bool SigSCCPUser::initialize(NamedList& params)
+{
+#ifdef DEBUG
+    String tmp;
+    params.dump(tmp,"\r\n  ",'\'',true);
+    Debug(DebugAll,"SigSCCPUser::initialize %s",tmp.c_str());
+#endif
+    if (!m_user) {
+	m_user = new SCCPUserDummy(params);
+	plugin.engine()->insert(m_user);
+    }
+    return m_user && m_user->initialize(&params);
+
+}
+
+/**
+ * class SigSccpGtt
+ */
+
+SigSccpGtt::~SigSccpGtt()
+{
+    DDebug(&plugin,DebugAll,"Destroing SigSccpGtt [%p]",this);
+    if (m_gtt) {
+	plugin.engine()->remove(m_gtt);
+	TelEngine::destruct(m_gtt);
+    }
+}
+
+bool SigSccpGtt::initialize(NamedList& params)
+{
+    if (!m_gtt) {
+	m_gtt = new GTTranslator(params);
+	plugin.engine()->insert(m_gtt);
+    }
+    return m_gtt && m_gtt->initialize(&params);
 }
 
 /**
@@ -2781,11 +3444,11 @@ void SigTrunk::cleanup()
     release();
 }
 
-bool SigTrunk::startThread(String& error, unsigned long sleepUsec)
+bool SigTrunk::startThread(String& error, unsigned long sleepUsec, int floodLimit)
 {
     if (!m_thread) {
 	if (m_controller)
-	    m_thread = new SigTrunkThread(this,sleepUsec);
+	    m_thread = new SigTrunkThread(this,sleepUsec,floodLimit);
 	else {
 	    Debug(&plugin,DebugNote,
 		"Trunk('%s'). No worker thread for trunk without call controller [%p]",
@@ -2888,14 +3551,14 @@ bool SigSS7Isup::create(NamedList& params, String& error)
 	return false;
 
     // Load circuits lock state from file
-    NamedList* sect = s_cfgData.getSection(name());
-    if (sect) {
+    NamedList sect(name());
+    if (plugin.loadTrunkData(sect)) {
 	DDebug(&plugin,DebugAll,
 	    "SigSS7Isup('%s'). Loading circuits lock state from config [%p]",
 	    name().c_str(),this);
-	unsigned int n = sect->count();
+	unsigned int n = sect.count();
 	for (unsigned int i = 0; i < n; i++) {
-	    NamedString* ns = sect->getParam(i);
+	    NamedString* ns = sect.getParam(i);
 	    if (!ns)
 		continue;
 	    unsigned int code = ns->name().toInteger(0);
@@ -2934,7 +3597,8 @@ bool SigSS7Isup::create(NamedList& params, String& error)
     }
 
     // Start thread
-    if (!startThread(error,plugin.engine()->tickDefault()))
+    if (!startThread(error,plugin.engine()->tickDefault(),
+	params.getIntValue("floodevents",s_floodEvents)))
 	return false;
 
     return true;
@@ -2999,6 +3663,9 @@ bool SigSS7Isup::verifyController(const NamedList* params, bool save)
 	isup()->buildVerifyEvent(tmp);
 	params = &tmp;
     }
+    // Load config
+    NamedList sect(name());
+    plugin.loadTrunkData(sect);
 
     Lock lock(m_controller);
     SignallingCircuitGroup* group = m_controller->circuits();
@@ -3007,12 +3674,8 @@ bool SigSS7Isup::verifyController(const NamedList* params, bool save)
     DDebug(&plugin,DebugInfo,"SigSS7Isup('%s'). Verifying circuits state [%p]",
 	name().c_str(),this);
     Lock lockGroup(group);
-    NamedList* sect = s_cfgData.getSection(name());
-    if (!sect) {
-	s_cfgData.createSection(name());
-	sect = s_cfgData.getSection(name());
-    }
     bool changed = false;
+    NamedList list(sect.c_str());
     // Save local changed maintenance status
     // Save all remote lock flags (except for changed)
     for (ObjList* o = group->circuits().skipNull(); o; o = o->skipNext()) {
@@ -3023,7 +3686,7 @@ bool SigSS7Isup::verifyController(const NamedList* params, bool save)
 	// Param exists and remote state didn't changed: check local
 	//  maintenance flag against params's value (save if last state
         //  is not equal to the current one)
-	NamedString* cicParam = sect->getParam(code);
+	NamedString* cicParam = sect.getParam(code);
 	if (cicParam && !cic->locked(SignallingCircuit::LockRemoteChg)) {
 	    int cicFlags = 0;
 	    SignallingUtils::encodeFlags(0,cicFlags,*cicParam,SignallingCircuit::s_lockNames);
@@ -3033,8 +3696,14 @@ bool SigSS7Isup::verifyController(const NamedList* params, bool save)
 	else
 	    saveCic = (0 != cic->locked(SignallingCircuit::LockRemoteChg));
 
-	if (!saveCic)
+	if (!saveCic) {
+	    if (cicParam) {
+	        if (*cicParam)
+		    list.addParam(code,*cicParam);
+		changed = true;
+	    }
 	    continue;
+	}
 
 	int flags = 0;
 	if (cic->locked(SignallingCircuit::LockLocalMaintChg))
@@ -3057,16 +3726,19 @@ bool SigSS7Isup::verifyController(const NamedList* params, bool save)
 	    DDebug(&plugin,DebugInfo,
 		"SigSS7Isup('%s'). Saving cic %s flags 0x%x '%s' (all=0x%x) [%p]",
 		name().c_str(),code.c_str(),flags,tmp.c_str(),cic->locked(-1),this);
-	    sect->setParam(code,tmp);
+	    if (tmp)
+		list.addParam(code,tmp);
 	    changed = true;
 	}
+	else if (cicParam)
+	    changed = true;
 	cic->resetLock(SignallingCircuit::LockRemoteChg);
     }
     lockGroup.drop();
     lock.drop();
 
     if (changed && save)
-	s_cfgData.save();
+	plugin.saveTrunkData(list);
     return changed;
 }
 
@@ -3110,7 +3782,8 @@ bool SigIsdn::create(NamedList& params, String& error)
     q931()->initialize(&params);
 
     // Start thread
-    if (!startThread(error,plugin.engine()->tickDefault()))
+    if (!startThread(error,plugin.engine()->tickDefault(),
+	params.getIntValue("floodevents",s_floodEvents)))
 	return false;
 
     return true;
@@ -3347,7 +4020,8 @@ bool SigIsdnMonitor::create(NamedList& params, String& error)
     q931()->attach(groupCpe,false);
 
     // Start thread
-    if (!startThread(error,plugin.engine()->tickDefault()))
+    if (!startThread(error,plugin.engine()->tickDefault(),
+	params.getIntValue("floodevents",s_floodEvents)))
 	return false;
 
     if (debugAt(DebugInfo)) {
@@ -3401,6 +4075,123 @@ void SigIsdnMonitor::release()
 	m_controller = 0;
     }
     XDebug(&plugin,DebugAll,"SigIsdnMonitor('%s'). Released [%p]",name().c_str(),this);
+}
+
+/**
+ * SigSS7Tcap
+ */
+void SigSS7Tcap::destroyed()
+{
+    DDebug(&plugin,DebugAll,"SigSS7TCAP::destroyed() [%p]",this);
+    TelEngine::destruct(m_tcap);
+    SigTopmost::destroyed();
+}
+
+bool SigSS7Tcap::initialize(NamedList& params)
+{
+    if (!m_tcap) {
+	String type = params.getValue("type","");
+	m_tcap = YSIGCREATE(SS7TCAP,&params);
+	if (m_tcap)
+	    plugin.engine()->insert(m_tcap);
+    }
+    return m_tcap && m_tcap->initialize(&params);
+}
+
+void SigSS7Tcap::status(String& retVal)
+{
+    retVal << "type=" << (m_tcap ? m_tcap->componentType() : "");
+    NamedList p("");
+    m_tcap->status(p);
+    retVal << ";totalIncoming=" << p.getValue("totalIncoming","0");
+    retVal << ",totalOutgoing=" << p.getValue("totalOutgoing","0");
+    retVal << ",totalDiscarded=" << p.getValue("totalDiscarded","0");
+    retVal << ",totalNormal=" << p.getValue("totalNormal","0");
+    retVal << ",totalAbnormal=" << p.getValue("totalAbnormal","0");
+}
+
+/**
+ * MsgTcapUser
+ */
+MsgTCAPUser::~MsgTCAPUser()
+{
+    DDebug(&plugin,DebugAll,"MsgTCAPUser::~MsgTCAPUser() [%p]",this);
+}
+
+bool MsgTCAPUser::initialize(NamedList& params)
+{
+    DDebug(&plugin,DebugAll,"MsgTCAPUser::initialize() [%p]",this);
+    m_tcapName = params.getValue("tcap");
+    plugin.requestRelay(SigDriver::TcapRequest,"tcap.request");
+    if (!tcapAttach())
+	Debug(DebugMild,"Please move configuration of [%s] after [%s], cannot attach now",
+	    TCAPUser::toString().c_str(),m_tcapName.c_str());
+    return true;
+}
+
+SS7TCAP* MsgTCAPUser::tcapAttach()
+{
+    if (!tcap()) {
+	SignallingComponent* tc = plugin.engine()->find(m_tcapName,"SS7TCAP");
+	if (tc)
+	    attach(YOBJECT(SS7TCAP,tc));
+    }
+    return tcap();
+}
+
+bool MsgTCAPUser::tcapRequest(NamedList& params)
+{
+    const String* name = params.getParam(YSTRING("tcap"));
+    if (m_tcapName && !TelEngine::null(name) && (*name != m_tcapName))
+	return false;
+    if (tcapAttach()) {
+	SS7TCAPError err = tcap()->userRequest(params);
+	return err.error() == SS7TCAPError::NoError;
+    }
+    return false;
+}
+
+bool MsgTCAPUser::tcapIndication(NamedList& params)
+{
+    Message msg("tcap.indication");
+    msg.addParam("tcap",m_tcapName,false);
+    msg.addParam("tcap.user",TCAPUser::toString(),false);
+    msg.copyParams(params);
+    return Engine::dispatch(&msg);
+}
+
+/**
+ * SigTCAPUser
+ */
+SigTCAPUser::~SigTCAPUser()
+{
+    DDebug(&plugin,DebugAll,"SigTCAPUser::~SigTCAPUser() [%p]",this);
+}
+
+bool SigTCAPUser::initialize(NamedList& params)
+{
+    DDebug(&plugin,DebugAll,"SigTCAPUser::initialize() [%p]",this);
+    if (!m_user)
+	m_user = new MsgTCAPUser(toString().c_str());
+    if (m_user)
+	m_user->initialize(params);
+    return true;
+}
+
+bool SigTCAPUser::tcapRequest(NamedList& params)
+{
+    return (m_user && m_user->tcapRequest(params));
+}
+
+void SigTCAPUser::status(String& retVal)
+{
+}
+
+void SigTCAPUser::destroyed()
+{
+    DDebug(&plugin,DebugAll,"SigTCAPUser::destroyed() [%p]",this);
+    TelEngine::destruct(m_user);
+    SigTopmost::destroyed();
 }
 
 /**
@@ -3861,6 +4652,7 @@ void SigTrunkThread::run()
 	return;
     DDebug(&plugin,DebugAll,"%s is running for trunk '%s' [%p]",
 	name(),m_trunk->name().c_str(),this);
+    int evCount = 0;
     SignallingEvent* event = 0;
     while (true) {
 	if (!event)
@@ -3870,11 +4662,26 @@ void SigTrunkThread::run()
 	Time time;
 	event = m_trunk->controller()->getEvent(time);
 	if (event) {
-	    XDebug(&plugin,DebugAll,"Trunk('%s'). Got event (%p,'%s',%p,%u)",
-		m_trunk->name().c_str(),event,event->name(),event->call(),
+	    evCount++;
+	    XDebug(&plugin,DebugAll,"Trunk('%s'). Got event #%d (%p,'%s',%p,%u)",
+		m_trunk->name().c_str(),evCount,
+		event,event->name(),event->call(),
 		event->call()?event->call()->refcount():0);
 	    m_trunk->handleEvent(event);
 	    delete event;
+	    if (evCount == m_floodEvents)
+		Debug(&plugin,DebugMild,"Trunk('%s') flooded: %d handled events",
+		    m_trunk->name().c_str(),evCount);
+	    else if ((evCount % m_floodEvents) == 0)
+		Debug(&plugin,DebugWarn,"Trunk('%s') severe flood: %d events",
+		    m_trunk->name().c_str(),evCount);
+	}
+	else {
+#ifdef XDEBUG
+	    if (evCount)
+		Debug(&plugin,DebugAll,"Trunk('%s'). Got no event",m_trunk->name().c_str());
+#endif
+	    evCount = 0;
 	}
 	// Check timeout if waiting to terminate
 	if (m_timeout && time.msec() > m_timeout) {
@@ -3996,6 +4803,166 @@ bool IsupEncodeHandler::received(Message& msg)
     TelEngine::destruct(data);
     msg.setParam("error","Encoder failure");
     return false;
+}
+
+/**
+ * SCCPHandler
+ */
+
+bool SCCPHandler::received(Message& msg)
+{
+    if (!plugin.engine())
+	return false;
+#ifdef XDEBUG
+    String tmp;
+    msg.dump(tmp,"\r\n  ",'\'',true);
+    Debug(DebugAll,"SCCPHandler::received%s",tmp.c_str());
+#endif
+    const char* compName = msg.getValue("component-name");
+    if (!compName) {
+	DDebug(&plugin,DebugInfo,"Received message %s widthout component name",msg.c_str());
+	return false;
+    }
+    SignallingComponent* cmp = plugin.engine()->find(compName);
+    if (!cmp) {
+	DDebug(&plugin,DebugInfo,"Failed to find signalling component %s",compName);
+	return false;
+    }
+    SCCPUserDummy* sccpUser = YOBJECT(SCCPUserDummy,cmp);
+    if (!sccpUser) {
+	DDebug(&plugin,DebugInfo,"The component %s is not an instance of SCCPUserDummy!",compName);
+	return false;
+    }
+    DataBlock data;
+    NamedString* dataNamedPointer = msg.getParam("data");
+    if (dataNamedPointer) {
+	NamedPointer* dataPointer = YOBJECT(NamedPointer,dataNamedPointer);
+	if (dataPointer) {
+	    DataBlock* recvData = YOBJECT(DataBlock,dataPointer->userData());
+	    if (recvData)
+		data.assign(recvData->data(),recvData->length());
+	} else {
+	    String* hexData = YOBJECT(String,dataNamedPointer);
+	    if (hexData) {
+		data.unHexify(hexData->c_str(),hexData->length(),' ');
+	    }
+	} 
+    }
+    if (data.length() == 0) {
+	DDebug(&plugin,DebugNote,"Received message %s with no data",msg.c_str());
+	return false;
+    }
+    if (msg.getParam("mgm")) {
+	return sccpUser->sccpNotify((SCCP::Type)msg.getIntValue("type"),msg);
+    }
+    return sccpUser->sendData(data,msg);
+}
+
+/**
+ * class SCCPUserDummy
+ */
+
+SCCPUserDummy::SCCPUserDummy(const NamedList& params)
+    :SignallingComponent(params,&params), SCCPUser(params), m_ssn(0)
+{
+    Debug(&plugin,DebugAll,"Creating SCCPUserDummy [%p]",this);
+    m_ssn = params.getIntValue("ssn",0);
+}
+
+SCCPUserDummy::~SCCPUserDummy()
+{
+    Debug(&plugin,DebugAll,"Destroing SCCPUserDummy [%p]",this);
+}
+
+HandledMSU SCCPUserDummy::receivedData(DataBlock& data, NamedList& params)
+{
+    int ssn = params.getIntValue("ssn");
+    if (m_ssn && ssn != m_ssn)
+	return HandledMSU::Rejected;
+    Message* msg = new Message(params);
+    *msg = "sccp.message";
+    String hexData;
+    hexData.hexify(data.data(),data.length(),' ');
+    DataBlock* msgData = new DataBlock(data);
+    msg->setParam(new NamedPointer("data",msgData));
+    msg->setParam("hexData",hexData);
+    msg->setParam("msgType","indication");
+    Engine::enqueue(msg);
+    return HandledMSU::Accepted;
+}
+
+HandledMSU SCCPUserDummy::notifyData(DataBlock& data, NamedList& params)
+{
+    Message* msg = new Message("sccp.message");
+    msg->copyParams(params);
+    String hexData;
+    hexData.hexify(data.data(),data.length(),' ');
+    DataBlock* msgData = new DataBlock(data);
+    msg->setParam(new NamedPointer("data",msgData));
+    msg->setParam("hexData",hexData);
+    msg->setParam("msgType","notification");
+    Engine::enqueue(msg);
+    return HandledMSU::Accepted;
+}
+
+bool SCCPUserDummy::managementNotify(SCCP::Type type, NamedList &params)
+{
+    int ssn = params.getIntValue("ssn");
+    if (ssn != m_ssn)
+	return false;
+    switch (type) {
+	case SCCP::CoordinateConfirm:
+	    DDebug(&plugin,DebugMild,"Subsystem %d can Go Out Of Service",m_ssn);
+	    break;
+	case SCCP::CoordinateIndication:
+	    DDebug(&plugin,DebugMild,"SSN %d received SCCP::CoordinateIndication",m_ssn);
+	    sccpNotify(SCCP::CoordinateResponse,params);
+	    break;
+	default:
+	    return false;
+    }
+    return true;
+}
+
+/**
+ * class GTTranslator
+ */
+
+GTTranslator::GTTranslator(const NamedList& params)
+    : GTT(params)
+{
+    DDebug(this,DebugAll,"Crated Global Title Translator [%p]",this);
+}
+
+GTTranslator::~GTTranslator()
+{
+    DDebug(this,DebugAll,"Destroing Global Title Translator [%p]",this);
+}
+
+NamedList* GTTranslator::routeGT(const NamedList& gt, const String& prefix)
+{
+    // TODO keep a cache!!
+    // Verify iff the requested gt exists in cache
+    // if exists return the cached translation of th GT
+    // if not exists send it for translation
+    Message* msg = new Message("sccp.route");
+    msg->copySubParams(gt,prefix + ".");
+    if (Engine::dispatch(msg)) // Append the translated GT to cache
+	return msg;
+    TelEngine::destruct(msg);
+    return 0;
+}
+
+void GTTranslator::updateTables(const NamedList& params)
+{
+    Message* msg = new Message("sccp.update");
+    msg->copyParams(params);
+    Engine::enqueue(msg);
+}
+
+bool GTTranslator::initialize(const NamedList* config)
+{
+    return GTT::initialize(config);
 }
 
 /**

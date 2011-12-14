@@ -44,7 +44,7 @@
 __declspec(dllimport) BOOL WINAPI SHGetSpecialFolderPathA(HWND,LPSTR,INT,BOOL);
 #endif
 
-#else
+#else // _WINDOWS
 
 #include "yatepaths.h"
 #include <dirent.h>
@@ -57,7 +57,9 @@ typedef void* HMODULE;
 #define CFG_DIR ".yate"
 #endif
 
-#endif
+static int s_childsig = 0;
+
+#endif // _WINDOWS
 
 #include <unistd.h>
 #include <stdlib.h>
@@ -332,6 +334,9 @@ bool EngineStatusHandler::received(Message &msg)
     msg.retValue() << ",messages=" << Engine::self()->messageCount();
     msg.retValue() << ",supervised=" << (s_super_handle >= 0);
     msg.retValue() << ",runattempt=" << s_run_attempt;
+#ifndef _WINDOWS
+    msg.retValue() << ",lastsignal=" << s_childsig;
+#endif
     msg.retValue() << ",threads=" << Thread::count();
     msg.retValue() << ",workers=" << EnginePrivate::count;
     msg.retValue() << ",mutexes=" << Mutex::count();
@@ -819,10 +824,12 @@ static int supervise(void)
 			s_runagain = false;
 		    else
 			retcode &= 127;
+		    s_childsig = 0;
 		}
 		else if (WIFSIGNALED(status)) {
 		    retcode = WTERMSIG(status);
 		    ::fprintf(stderr,"Supervisor: child %d died on signal %d\n",s_childpid,retcode);
+		    s_childsig = retcode;
 		}
 		s_childpid = -1;
 		break;
@@ -875,6 +882,7 @@ static int supervise(void)
 		    break;
 	    }
 	    s_childpid = -1;
+	    s_childsig = SIGCHLD;
 	}
 	if (s_logrotator) {
 	    copystream(2,logfd[0]);
@@ -1000,7 +1008,6 @@ Engine::~Engine()
     assert(this == s_self);
     m_dispatcher.clear();
     m_libs.clear();
-    plugins.clear();
     s_mode = Stopped;
     s_self = 0;
 }
@@ -1080,6 +1087,9 @@ int Engine::run()
     s_params.addParam("clientmode",String::boolText(clientMode()));
     s_params.addParam("supervised",String::boolText(s_super_handle >= 0));
     s_params.addParam("runattempt",String(s_run_attempt));
+#ifndef _WINDOWS
+    s_params.addParam("lastsignal",String(s_childsig));
+#endif
     s_params.addParam("maxworkers",String(s_maxworkers));
 #ifdef _WINDOWS
     {
@@ -1101,6 +1111,7 @@ int Engine::run()
     install(new EngineHelp);
     loadPlugins();
     Debug(DebugAll,"Loaded %d plugins",plugins.count());
+    internalStatisticsStart();
     if (s_super_handle >= 0) {
 	install(new EngineSuperHandler);
 	if (s_restarts)
@@ -1230,12 +1241,22 @@ int Engine::run()
     ::signal(SIGQUIT,SIG_DFL);
 #endif
     delete this;
-    Debug(DebugAll,"Exiting with %d locked mutexes",Mutex::locks());
+    int mux = Mutex::locks();
+    unsigned int cnt = plugins.count();
+    plugins.clear();
+    if (mux || cnt)
+	Debug(DebugGoOn,"Exiting with %d locked mutexes and %u plugins loaded!",mux,cnt);
 #ifdef _WINDOWS
     ::WSACleanup();
 #endif
     setStatus(SERVICE_STOPPED);
     return s_haltcode;
+}
+
+void Engine::internalStatisticsStart()
+{
+    // This is here so runtime analyzers can start or reset statistics
+    //  after the cruft of module load + global objects initialization
 }
 
 Engine* Engine::self()
@@ -1601,6 +1622,7 @@ static void usage(bool client, FILE* f)
 "     t            Timestamp debugging messages relative to program start\n"
 "     e            Timestamp debugging messages based on EPOCH (1-1-1970 GMT)\n"
 "     f            Timestamp debugging in GMT format YYYYMMDDhhmmss.uuuuuu\n"
+"     z            Timestamp debugging in local timezone YYYYMMDDhhmmss.uuuuuu\n"
     ,client ? "" :
 #ifdef _WINDOWS
 "   --service      Run as Windows service\n"
@@ -1877,6 +1899,9 @@ int Engine::main(int argc, const char** argv, const char** env, RunMode mode, bo
 				    break;
 				case 'f':
 				    tstamp = Debugger::Textual;
+				    break;
+				case 'z':
+				    tstamp = Debugger::TextLocal;
 				    break;
 				default:
 				    initUsrPath(s_usrpath);

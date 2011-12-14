@@ -60,7 +60,7 @@ NamedList& NamedList::operator=(const NamedList& value)
 
 void* NamedList::getObject(const String& name) const
 {
-    if (name == "NamedList")
+    if (name == YSTRING("NamedList"))
 	return const_cast<NamedList*>(this);
     return String::getObject(name);
 }
@@ -281,10 +281,11 @@ const char* NamedList::getValue(const String& name, const char* defvalue) const
     return s ? s->c_str() : defvalue;
 }
 
-int NamedList::getIntValue(const String& name, int defvalue) const
+int NamedList::getIntValue(const String& name, int defvalue, int minvalue, int maxvalue,
+    bool clamp) const
 {
     const NamedString *s = getParam(name);
-    return s ? s->toInteger(defvalue) : defvalue;
+    return s ? s->toInteger(defvalue,0,minvalue,maxvalue,clamp) : defvalue;
 }
 
 int NamedList::getIntValue(const String& name, const TokenDict* tokens, int defvalue) const

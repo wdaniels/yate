@@ -201,6 +201,8 @@ protected:
     void processActionContentAdd(JGEvent* event);
     // Process an ActContentAdd event
     void processActionTransportInfo(JGEvent* event);
+    // Handle answer (session accept) events for non file transfer
+    void processActionAccept(JGEvent* ev);
     // Update a received candidate. Return true if changed
     bool updateCandidate(unsigned int component, JGSessionContent& local,
 	JGSessionContent& recv);
@@ -246,7 +248,8 @@ protected:
     bool initLocalCandidates(JGSessionContent& content, bool sendTransInfo);
     // Match a local content agaist a received one
     // Return false if there is no common media
-    bool matchMedia(JGSessionContent& local, JGSessionContent& recv) const;
+    bool matchMedia(JGSessionContent& local, JGSessionContent& recv,
+	bool& firstChanged, bool& telEvChanged) const;
     // Find a session content in a list
     JGSessionContent* findContent(JGSessionContent& recv, const ObjList& list) const;
     // Set early media to remote
@@ -269,10 +272,7 @@ protected:
 	    return "bidir";
 	}
     // Build a RTP candidate
-    inline JGRtpCandidate* buildCandidate(bool rtp = true) {
-	    return new JGRtpCandidate(id() + "_candidate_" + String((int)::random()),
-		rtp ? "1" : "2");
-	}
+    JGRtpCandidate* buildCandidate(bool nonP2P = true, bool rtp = true);
     // Get the first file transfer content
     inline JGSessionContent* firstFTContent() {
 	    ObjList* o = m_ftContents.skipNull();
@@ -285,10 +285,16 @@ private:
     void handleAudioInfoEvent(JGEvent* event);
     // Check jingle version override from call.execute or resource caps
     void overrideJingleVersion(const NamedList& list, bool caps);
+    // Override session flags
+    void overrideJingleFlags(const NamedList& list, const char* param);
     // Copy chan/session parameters to a destination list
     void copySessionParams(NamedList& list, bool redirect = true);
     // Check media for a received content
     bool checkMedia(const JGEvent& event, JGSessionContent& c);
+    // Clear and reset data related to a given type: audio ...
+    void resetEp(const String& what, bool releaseContent = true);
+    // Hangup and drop the call if failed to setup encryption
+    void dropNoCrypto();
 
     Mutex m_mutex;                       // Lock transport and session
     State m_state;                       // Connection state
@@ -296,6 +302,7 @@ private:
     bool m_rtpStarted;                   // RTP started flag used by version 0 of the jingle session
     bool m_acceptRelay;                  // Accept to replace with a relay candidate
     JGSession::Version m_sessVersion;    // Jingle session version
+    int m_sessFlags;                     // Session flags
     JabberID m_local;                    // Local user's JID
     JabberID m_remote;                   // Remote user's JID
     ObjList m_audioContents;             // The list of negotiated audio contents
@@ -600,12 +607,6 @@ static inline bool isTelEvent(const String& name)
 	(name &= "audio/telephone-event");
 };
 
-static inline void addValidParam(Message& m, const char* param, const char* value)
-{
-    if (!null(value))
-	m.addParam(param,value);
-}
-
 // Add a parameter to a list.
 // Optionally add it to a copy params string
 static inline void jingleAddParam(NamedList& list, const char* param, const char* value,
@@ -617,6 +618,67 @@ static inline void jingleAddParam(NamedList& list, const char* param, const char
     if (copy)
 	copy->append(param,",");
 }
+
+// Add secure parameters from crypto
+static void addSecure(NamedList& list, JGCrypto* crypto)
+{
+    if (!crypto)
+	return;
+    list.addParam("secure",String::boolText(true));
+    list.addParam("crypto_suite",crypto->m_suite);
+    list.addParam("crypto_key",crypto->m_keyParams);
+    // TODO: add session params
+}
+
+// Replace 'ilbc' to used ilbc20/30
+static void adjustUsedIlbc(String& fmts)
+{
+    if (!fmts)
+	return;
+    ObjList* list = fmts.split(',',false);
+    ObjList* o = list->find("ilbc");
+    if (o) {
+	JGRtpMedia* m = 0;
+	plugin.lock();
+	for (ObjList* l = s_usedCodecs.skipNull(); l; l = l->skipNext()) {
+	    m = static_cast<JGRtpMedia*>(l->get());
+	    if (m->m_name == "iLBC")
+		break;
+	    m = 0;
+	}
+	if (m)
+	    *(static_cast<String*>(o->get())) = m->m_synonym;
+	else
+	    o->remove();
+	plugin.unlock();
+	fmts.clear();
+	fmts.append(list,",");
+    }
+    TelEngine::destruct(list);
+}
+
+#ifdef DEBUG
+// Utility function needed for debug: dump a candidate to a string
+static void dumpCandidate(String& buf, JGRtpCandidate* c, char sep = ' ')
+{
+    if (!c)
+	return;
+    buf << "name=" << *c;
+    buf << sep << "addr=" << c->m_address;
+    buf << sep << "port=" << c->m_port;
+    buf << sep << "component=" << c->m_component;
+    buf << sep << "generation=" << c->m_generation;
+    buf << sep << "network=" << c->m_network;
+    buf << sep << "priority=" << c->m_priority;
+    buf << sep << "protocol=" << c->m_protocol;
+    buf << sep << "type=" << c->m_type;
+    JGRtpCandidateP2P* p2p = YOBJECT(JGRtpCandidateP2P,c);
+    if (p2p) {
+	buf << sep << "username=" << p2p->m_username;
+	buf << sep << "password=" << p2p->m_password;
+    }
+}
+#endif
 
 
 /*
@@ -732,7 +794,7 @@ YJGConnection::YJGConnection(Message& msg, const char* caller, const char* calle
     : Channel(&plugin,0,true),
     m_mutex(true,"YJGConnection"),
     m_state(Pending), m_session(0), m_rtpStarted(false), m_acceptRelay(s_acceptRelay),
-    m_sessVersion(s_sessVersion),
+    m_sessVersion(s_sessVersion), m_sessFlags(s_jingle->sessionFlags()),
     m_local(caller), m_remote(called), m_audioContent(0),
     m_audioFormats(JGRtpMediaList::Audio),
     m_callerPrompt(msg.getValue("callerprompt")),
@@ -752,6 +814,7 @@ YJGConnection::YJGConnection(Message& msg, const char* caller, const char* calle
     overrideJingleVersion(msg,false);
     if (available)
 	overrideJingleVersion(caps,true);
+    overrideJingleFlags(msg,"ojingle_flags");
     if (m_sessVersion != JGSession::Version0) {
 	m_offerRawTransport = msg.getBoolValue("offerrawudp",s_offerRawTransport);
 	m_offerIceTransport = msg.getBoolValue("offericeudp",s_offerIceTransport);
@@ -770,12 +833,15 @@ YJGConnection::YJGConnection(Message& msg, const char* caller, const char* calle
     if (null(file)) {
 	String audio = msg["formats"];
 	plugin.lock();
-	if (!(audio || s_usedCodecs.createList(audio,true)))
+	if (audio)
+	    adjustUsedIlbc(audio);
+	else if (!s_usedCodecs.createList(audio,true))
 	    audio = "alaw,mulaw";
 	m_audioFormats.setMedia(s_usedCodecs,audio);
 	plugin.unlock();
     }
     else {
+	m_secure = false;
 	m_ftStatus = FTIdle;
 	m_ftHostDirection = FTHostLocal;
 	NamedString* oper = msg.getParam("operation");
@@ -832,7 +898,7 @@ YJGConnection::YJGConnection(JGEvent* event)
     : Channel(&plugin,0,false),
     m_mutex(true,"YJGConnection"),
     m_state(Active), m_session(event->session()), m_rtpStarted(false), m_acceptRelay(s_acceptRelay),
-    m_sessVersion(event->session()->version()),
+    m_sessVersion(event->session()->version()), m_sessFlags(s_jingle->sessionFlags()),
     m_local(event->session()->local()), m_remote(event->session()->remote()),
     m_audioContent(0),
     m_audioFormats(JGRtpMediaList::Audio),
@@ -882,6 +948,7 @@ YJGConnection::YJGConnection(JGEvent* event)
 	    switch (c->type()) {
 		case JGSessionContent::RtpIceUdp:
 		case JGSessionContent::RtpRawUdp:
+		case JGSessionContent::RtpP2P:
 		    haveAudioSession = haveAudioSession || c->isSession();
 		    addContent(false,c);
 		    break;
@@ -899,7 +966,6 @@ YJGConnection::YJGConnection(JGEvent* event)
 		    // Append this content to 'remove' list
 		    // Let the list own it since we'll remove it from event's list
 		    remove.append(c);
-		    continue;
 	    }
 	    event->m_contents.remove(c,false);
 	}
@@ -912,6 +978,7 @@ YJGConnection::YJGConnection(JGEvent* event)
 	    error = "No content with session disposition";
     }
     else if (m_ftContents.skipNull()) {
+	m_secure = false;
 	m_ftStatus = FTIdle;
 	m_ftHostDirection = FTHostRemote;
 	m_session->buildSocksDstAddr(m_dstAddrDomain);
@@ -981,6 +1048,9 @@ bool YJGConnection::route()
     if (m_subject)
 	m->addParam("subject",m_subject);
     m->addParam("jingle_version",JGSession::lookupVersion(m_sessVersion));
+    String flags;
+    JGEngine::encodeFlags(flags,m_sessFlags,JGSession::s_flagName);
+    m->addParam("jingle_flags",flags,false);
     m_mutex.lock();
     // TODO: add remote ip/port
     // Fill file transfer data
@@ -1022,7 +1092,11 @@ void YJGConnection::callAccept(Message& msg)
     m_secure = msg.getBoolValue("secure",m_secure);
     m_secureRequired = msg.getBoolValue("secure_required",m_secureRequired);
     m_dtmfMeth = msg.getIntValue("dtmfmethod",s_dictDtmfMeth,m_dtmfMeth);
+    overrideJingleFlags(msg,"jingle_flags");
     Channel::callAccept(msg);
+    Lock lock(m_mutex);
+    if (m_session)
+	m_session->setFlags(m_sessFlags);
 }
 
 void YJGConnection::callRejected(const char* error, const char* reason,
@@ -1367,7 +1441,7 @@ void YJGConnection::hangup(const char* reason, const char* text)
 	switch (res) {
 	    case JGSession::CryptoRequired:
 	    case JGSession::InvalidCrypto:
-		xml = m_session->createReason(JGSession::ReasonOk,text,
+		xml = m_session->createReason(JGSession::ReasonSecurity,text,
 		    m_session->createRtpSessionReason(res));
 		break;
 	    case JGSession::Transferred:
@@ -1435,13 +1509,15 @@ bool YJGConnection::handleEvent(JGEvent* event)
 		}
 	    }
 	    else {
-		parameters().clearParams();
 		URI uri(event->text());
+		paramMutex().lock();
+		parameters().clearParams();
 		parameters().addParam("called",uri.getUser());
 		parameters().addParam("calledname",uri.getDescription(),false);
 		parameters().addParam("calleduri",event->text());
 		parameters().addParam("copyparams","");
 		copySessionParams(parameters());
+		paramMutex().unlock();
 	    }
 	}
 	const char* reason = event->reason();
@@ -1650,51 +1726,11 @@ bool YJGConnection::handleEvent(JGEvent* event)
 	    }
 	    break;
 	case JGSession::ActAccept:
-	    if (isAnswered())
-		break;
-	    if (m_ftStatus != FTNone)
-		return setupSocksFileTransfer(true);
-	    // Update media
-	    Debug(this,DebugCall,"Remote peer answered the call [%p]",this);
-	    m_state = Active;
-	    // Remove current content only if not Version0
-	    // For this version we keep only 1 content
-	    if (m_sessVersion != JGSession::Version0)
-		removeCurrentAudioContent();
-	    for (ObjList* o = event->m_contents.skipNull(); o; o = o->skipNext()) {
-		JGSessionContent* recv = static_cast<JGSessionContent*>(o->get());
-		JGSessionContent* c = findContent(*recv,m_audioContents);
-		if (!c)
-		    continue;
-		// Update credentials for ICE-UDP
-		// only if not version 0 (this version only sends media in accept)
-		if (m_sessVersion != JGSession::Version0) {
-		    c->m_rtpRemoteCandidates.m_password = recv->m_rtpRemoteCandidates.m_password;
-		    c->m_rtpRemoteCandidates.m_ufrag = recv->m_rtpRemoteCandidates.m_ufrag;
-		}
-		// Update media
-		if (!matchMedia(*c,*recv)) {
-		    Debug(this,DebugInfo,"No common media for content=%s [%p]",
-			c->toString().c_str(),this);
-		    continue;
-		}
-		c->m_rtpMedia.m_ready = true;
-		// Update transport(s)
-		// Force changed for Version0 (we have valid common media for this version)
-		bool changed = false;
-		if (m_sessVersion != JGSession::Version0) {
-		    changed = updateCandidate(1,*c,*recv);
-		    changed = updateCandidate(2,*c,*recv) || changed;
-		}
-		else
-		    changed = true;
-		if (changed && !m_audioContent && recv->isSession())
-		    resetCurrentAudioContent(true,false,true,c);
+	    if (!isAnswered()) {
+		if (m_ftStatus != FTNone)
+		    return setupSocksFileTransfer(true);
+		processActionAccept(event);
 	    }
-	    if (!m_audioContent)
-		resetCurrentAudioContent(true,false,true);
-	    status("answered");
-	    Engine::enqueue(message("call.answered",false,true));
 	    break;
 	case JGSession::ActTransfer:
 	    if (m_ftStatus == FTNone)
@@ -1818,7 +1854,7 @@ bool YJGConnection::presenceChanged(bool available, NamedList* params)
 	if (m_offerIceTransport)
 	    addContent(true,buildAudioContent(JGRtpCandidates::RtpIceUdp));
 	m_session = s_jingle->call(m_sessVersion,m_local,m_remote,m_audioContents,transfer,
-	    m_callerPrompt,m_subject,m_line);
+	    m_callerPrompt,m_subject,m_line,&m_sessFlags);
 	// Init now the transport for version 0
 	if (m_session && m_session->version() == JGSession::Version0)
 	    resetCurrentAudioContent(true,false);
@@ -1970,7 +2006,8 @@ void YJGConnection::processActionTransportInfo(JGEvent* event)
 {
     if (!event)
 	return;
-
+    DDebug(this,DebugAll,"processActionTransportInfo() event=%s' [%p]",
+	event->actionName(),this);
     bool ok = m_sessVersion != JGSession::Version0;
     bool startAudioContent = false;
     JGSessionContent* newContent = 0;
@@ -2020,6 +2057,56 @@ void YJGConnection::processActionTransportInfo(JGEvent* event)
     enqueueCallProgress();
 }
 
+// Handle answer (session accept) event for non file transfer
+void YJGConnection::processActionAccept(JGEvent* event)
+{
+    // Update media
+    Debug(this,DebugCall,"Remote peer answered the call [%p]",this);
+    m_state = Active;
+    status("answered");
+    for (ObjList* o = event->m_contents.skipNull(); o; o = o->skipNext()) {
+	JGSessionContent* recv = static_cast<JGSessionContent*>(o->get());
+	// Ignore non session contents
+	if (!recv->isSession())
+	    continue;
+	JGSessionContent* c = findContent(*recv,m_audioContents);
+	if (!c)
+	    continue;
+	// Update credentials for ICE-UDP
+	// only if not version 0 (this version only sends media in accept)
+	if (m_sessVersion != JGSession::Version0) {
+	    c->m_rtpRemoteCandidates.m_password = recv->m_rtpRemoteCandidates.m_password;
+	    c->m_rtpRemoteCandidates.m_ufrag = recv->m_rtpRemoteCandidates.m_ufrag;
+	}
+	// Update media
+	bool mediaChanged = false;
+	bool telEvChanged = false;
+	if (!(checkMedia(*event,*recv) &&
+	    matchMedia(*c,*recv,mediaChanged,telEvChanged))) {
+	    if (c == m_audioContent)
+		resetEp("audio");
+	    continue;
+	}
+	c->m_rtpMedia.m_ready = true;
+	// First media changed for current audio content
+	// RTP don't support update: reset audio
+	if (mediaChanged && c == m_audioContent)
+	    resetEp("audio");
+	// Update transport(s)
+	// Force changed for Version0 (we have valid common media)
+	bool changed = (m_sessVersion == JGSession::Version0);
+	if (changed) {
+	    changed = updateCandidate(1,*c,*recv);
+	    changed = updateCandidate(2,*c,*recv) || changed;
+	}
+	if (changed && !m_audioContent)
+	    resetCurrentAudioContent(true,false,true,c);
+    }
+    if (!m_audioContent)
+	resetCurrentAudioContent(true,false,true);
+    Engine::enqueue(message("call.answered",false,true));
+}
+
 // Update a received candidate. Return true if changed
 bool YJGConnection::updateCandidate(unsigned int component, JGSessionContent& local,
     JGSessionContent& recv)
@@ -2028,8 +2115,17 @@ bool YJGConnection::updateCandidate(unsigned int component, JGSessionContent& lo
     if (!rtpRecv)
 	return false;
     JGRtpCandidate* rtp = local.m_rtpRemoteCandidates.findByComponent(component);
-    // Version0: check acceptable transport
-    if (m_sessVersion == JGSession::Version0) {
+#ifdef DEBUG
+    String s1;
+    String s2;
+    dumpCandidate(s1,rtpRecv);
+    dumpCandidate(s2,rtp);
+    Debug(this,DebugAll,"updateCandidate() recv: %s found: %s [%p]",
+	s1.c_str(),s2.c_str(),this);
+#endif
+    // Version0 or p2p transport: check acceptable transport
+    if (m_sessVersion == JGSession::Version0 ||
+	local.type() == JGSessionContent::RtpP2P) {
 	// We only handle UDP based transports for now
 	if (rtpRecv->m_protocol != "udp")
 	    return false;
@@ -2041,9 +2137,8 @@ bool YJGConnection::updateCandidate(unsigned int component, JGSessionContent& lo
 		    rtp->m_type.c_str(),this);
 		local.m_rtpRemoteCandidates.remove(rtp);
 		rtp = 0;
-		clearEndpoint();
-		m_rtpStarted = false;
-		m_rtpId.clear();
+		if (local.m_rtpMedia.media() == JGRtpMediaList::Audio)
+		    resetEp("audio",false);
 	    }
 	}
 	// Any other transport type accepted only initially
@@ -2205,6 +2300,8 @@ bool YJGConnection::resetCurrentAudioContent(bool session, bool earlyMedia,
 // For raw udp transports, sends a 'trying' session info
 bool YJGConnection::startRtp()
 {
+    if (m_hangup)
+	return false;
     if (!m_audioContent) {
 	DDebug(this,DebugInfo,"Failed to start RTP: no audio content [%p]",this);
 	return false;
@@ -2243,6 +2340,17 @@ bool YJGConnection::startRtp()
     //m.addParam("autoaddr","false");
     bool rtcp = (0 != m_audioContent->m_rtpLocalCandidates.findByComponent(2));
     m.addParam("rtcp",String::boolText(rtcp));
+    // Crypto
+    if (m_secure) {
+	ObjList* cr = m_audioContent->m_rtpMedia.m_cryptoRemote.skipNull();
+	if (cr && m_audioContent->m_rtpMedia.m_cryptoLocal.skipNull())
+	    addSecure(m,static_cast<JGCrypto*>(cr->get()));
+	else if (m_secureRequired) {
+	    Debug(this,DebugNote,"No required crypto in current content [%p]",this);
+	    dropNoCrypto();
+	    return false;
+	}
+    }
 
     String oldPort = rtpLocal->m_port;
 
@@ -2255,28 +2363,50 @@ bool YJGConnection::startRtp()
     m_rtpId = m.getValue("rtpid");
     rtpLocal->m_port = m.getValue("localport");
 
+    String buf;
+#ifdef DEBUG
+    buf << ". Candidates local: ";
+    dumpCandidate(buf,rtpLocal);
+    buf << " remote: ";
+    dumpCandidate(buf,rtpRemote);
+#endif
     Debug(this,DebugAll,
-	"RTP started for content='%s' local='%s:%s' remote='%s:%s' [%p]",
+	"RTP started for content='%s' local='%s:%s' remote='%s:%s'%s [%p]",
     	m_audioContent->toString().c_str(),
 	rtpLocal->m_address.c_str(),rtpLocal->m_port.c_str(),
-	rtpRemote->m_address.c_str(),rtpRemote->m_port.c_str(),this);
+	rtpRemote->m_address.c_str(),rtpRemote->m_port.c_str(),buf.safe(),this);
 
     if (oldPort != rtpLocal->m_port && m_session) {
 	rtpLocal->m_generation = rtpLocal->m_generation.toInteger(0) + 1;
 	m_session->sendContent(JGSession::ActTransportInfo,m_audioContent);
     }
 
-    if (m_audioContent->m_rtpLocalCandidates.m_type == JGRtpCandidates::RtpIceUdp &&
-	rtpRemote->m_address) {
+    if (rtpRemote->m_address &&
+	(m_audioContent->m_rtpLocalCandidates.m_type == JGRtpCandidates::RtpIceUdp ||
+	m_audioContent->m_rtpLocalCandidates.m_type == JGRtpCandidates::RtpP2P)) {
 	m_rtpStarted = true;
 	// Start STUN
 	Message* msg = plugin.message("socket.stun");
 	msg->userData(m.userData());
-	// FIXME: check if these parameters are correct
-	msg->addParam("localusername",m_audioContent->m_rtpRemoteCandidates.m_ufrag +
-	    m_audioContent->m_rtpLocalCandidates.m_ufrag);
-	msg->addParam("remoteusername",m_audioContent->m_rtpLocalCandidates.m_ufrag +
-	    m_audioContent->m_rtpRemoteCandidates.m_ufrag);
+	String user;
+	String pwd;
+	if (m_audioContent->m_rtpLocalCandidates.m_type == JGRtpCandidates::RtpIceUdp) {
+	    // FIXME: check if these parameters are correct
+	    user = m_audioContent->m_rtpRemoteCandidates.m_ufrag +
+		m_audioContent->m_rtpLocalCandidates.m_ufrag;
+	    pwd = m_audioContent->m_rtpLocalCandidates.m_ufrag +
+		m_audioContent->m_rtpRemoteCandidates.m_ufrag;
+	}
+	else {
+	    JGRtpCandidateP2P* local = YOBJECT(JGRtpCandidateP2P,rtpLocal);
+	    JGRtpCandidateP2P* remote = YOBJECT(JGRtpCandidateP2P,rtpRemote);
+	    if (local && remote) {
+		user = remote->m_username + local->m_username;
+		pwd = local->m_username + remote->m_username;
+	    }
+	}
+	msg->addParam("localusername",user);
+	msg->addParam("remoteusername",pwd);
 	msg->addParam("remoteip",rtpRemote->m_address.c_str());
 	msg->addParam("remoteport",rtpRemote->m_port);
 	msg->addParam("userid",m_rtpId);
@@ -2327,6 +2457,7 @@ bool YJGConnection::processContentAdd(const JGEvent& event, ObjList& ok, ObjList
 	switch (c->type()) {
 	    case JGSessionContent::RtpIceUdp:
 	    case JGSessionContent::RtpRawUdp:
+	    case JGSessionContent::RtpP2P:
 		break;
 	    case JGSessionContent::FileBSBOffer:
 	    case JGSessionContent::FileBSBRequest:
@@ -2473,12 +2604,14 @@ JGSessionContent* YJGConnection::buildAudioContent(JGRtpCandidates::Type type,
     JGSessionContent::Senders senders, bool rtcp, bool useFormats)
 {
     String id;
-    id << this->id() << "_content_" << (int)::random();
+    id << this->id() << "_content_" << (int)Random::random();
     JGSessionContent::Type t = JGSessionContent::Unknown;
     if (type == JGRtpCandidates::RtpRawUdp)
 	t = JGSessionContent::RtpRawUdp;
     else if (type == JGRtpCandidates::RtpIceUdp)
 	t = JGSessionContent::RtpIceUdp;
+    else if (type == JGRtpCandidates::RtpP2P)
+	t = JGSessionContent::RtpP2P;
     JGSessionContent* c = new JGSessionContent(t,id,senders,
 	isOutgoing() ? JGSessionContent::CreatorInitiator : JGSessionContent::CreatorResponder);
 
@@ -2488,7 +2621,7 @@ JGSessionContent* YJGConnection::buildAudioContent(JGRtpCandidates::Type type,
 	c->m_rtpMedia.m_cryptoRequired = true;
     if (useFormats)
 	c->m_rtpMedia.setMedia(m_audioFormats);
-    if (m_sessVersion == JGSession::Version0) {
+    if (m_sessVersion == JGSession::Version0 || type == JGRtpCandidates::RtpP2P) {
 	// Hack: set second telephone event for implementations expecting it
 	c->m_rtpMedia.m_telEventName2 = "audio/telephone-event";
     }
@@ -2507,7 +2640,7 @@ JGSessionContent* YJGConnection::buildFileTransferContent(bool send, const char*
 {
     // Build the content
     String id;
-    id << this->id() << "_content_" << (int)::random();
+    id << this->id() << "_content_" << (int)Random::random();
     JGSessionContent::Type t = JGSessionContent::Unknown;
     JGSessionContent::Senders s = JGSessionContent::SendUnknown;
     if (send) {
@@ -2541,10 +2674,12 @@ JGSessionContent* YJGConnection::buildFileTransferContent(bool send, const char*
 // Reserve local port for a RTP session content
 bool YJGConnection::initLocalCandidates(JGSessionContent& content, bool sendTransInfo)
 {
+    if (m_hangup)
+	return false;
     JGRtpCandidate* rtp = content.m_rtpLocalCandidates.findByComponent(1);
     bool incGeneration = (0 != rtp);
     if (!rtp) {
-	rtp = buildCandidate();
+	rtp = buildCandidate(content.type() != JGSessionContent::RtpP2P);
 	content.m_rtpLocalCandidates.append(rtp);
     }
 
@@ -2564,15 +2699,17 @@ bool YJGConnection::initLocalCandidates(JGSessionContent& content, bool sendTran
 	if (remote && remote->m_address)
 	    m.addParam("remoteip",remote->m_address);
     }
-    ObjList* cr = content.m_rtpMedia.m_cryptoRemote.skipNull();
-    if (cr) {
-	JGCrypto* crypto = static_cast<JGCrypto*>(cr->get());
-	m.addParam("secure",String::boolText(true));
-	m.addParam("crypto_suite",crypto->m_suite);
-	m.addParam("crypto_key",crypto->m_keyParams);
+    if (m_secure) {
+	ObjList* cr = content.m_rtpMedia.m_cryptoRemote.skipNull();
+	if (cr)
+	    addSecure(m,static_cast<JGCrypto*>(cr->get()));
+	else if (m_secureRequired) {
+	    // TODO: Terminate the call or try to use another content
+	    Debug(this,DebugNote,"No required crypto in current content [%p]",this);
+	    dropNoCrypto();
+	    return false;
+	}
     }
-    else if (m_secure)
-	m.addParam("secure",String::boolText(true));
 
     if (!Engine::dispatch(m)) {
 	Debug(this,DebugNote,"Failed to init RTP for content='%s' [%p]",
@@ -2580,14 +2717,19 @@ bool YJGConnection::initLocalCandidates(JGSessionContent& content, bool sendTran
 	return false;
     }
 
-    NamedString* cSuite = m.getParam("ocrypto_suite");
-    if (cSuite) {
-	JGCrypto* crypto = new JGCrypto("1",*cSuite,m.getValue("ocrypto_key"));
-	content.m_rtpMedia.m_cryptoLocal.append(crypto);
-    }
-    else if (m_secure && m_secureRequired) {
-	// TODO: Terminate the call or try to use another content
-
+    if (m_secure) {
+	NamedString* cSuite = m.getParam("ocrypto_suite");
+	if (cSuite) {
+	    JGCrypto* crypto = new JGCrypto("1",*cSuite,m.getValue("ocrypto_key"));
+	    content.m_rtpMedia.m_cryptoLocal.append(crypto);
+	}
+	else if (m_secureRequired) {
+	    // Failed to setup encryption
+	    // TODO: Terminate the call or try to use another content
+	    Debug(this,DebugNote,"Failed to setup required crypto [%p]",this);
+	    dropNoCrypto();
+	    return false;
+	}
     }
 
     plugin.setLocalIp(rtp->m_address,m);
@@ -2606,35 +2748,46 @@ bool YJGConnection::initLocalCandidates(JGSessionContent& content, bool sendTran
 
 // Match a local content agaist a received one
 // Return false if there is no common media
-bool YJGConnection::matchMedia(JGSessionContent& local, JGSessionContent& recv) const
+bool YJGConnection::matchMedia(JGSessionContent& local, JGSessionContent& recv,
+    bool& firstChanged, bool& telEvChanged) const
 {
-    int telEvent = 0;
+    bool first = true;
     ListIterator iter(local.m_rtpMedia);
-    for (GenObject* gen = 0; 0 != (gen = iter.get()); ) {
+    for (GenObject* gen = 0; 0 != (gen = iter.get()); first = false) {
 	JGRtpMedia* m = static_cast<JGRtpMedia*>(gen);
-	JGRtpMedia* found = 0;
-	for (ObjList* o = recv.m_rtpMedia.skipNull(); o; o = o->skipNext()) {
-	    JGRtpMedia* recvMedia = static_cast<JGRtpMedia*>(o->get());
-	    int id = recvMedia->m_id.toInteger();
-	    if (id > 95 && !telEvent && isTelEvent(recvMedia->m_name))
-		telEvent = id;
-	    if (!found && m->toString() == recvMedia->toString())
-		found = recvMedia;
-	    if (found && telEvent)
-		break;
-	}
-	if (found)
+	JGRtpMedia* found = recv.m_rtpMedia.findSynonym(m->m_synonym);
+	// Check synonym, the content is already checked
+	if (found) {
+	    if (m->m_id == found->m_id)
+		continue;
+	    Debug(this,DebugAll,
+		"Content '%s' remote changed payload id from %s to %s for '%s' [%p]",
+		local.toString().c_str(),m->m_id.c_str(),found->m_id.c_str(),
+		m->m_synonym.c_str(),this);
+	    m->m_id = found->m_id;
+	    if (first)
+		firstChanged = true;
 	    continue;
+	}
 	Debug(this,DebugAll,"Content '%s' removing media %s/%s from offer [%p]",
 	    local.toString().c_str(),m->m_id.c_str(),m->m_synonym.c_str(),this);
 	local.m_rtpMedia.remove(m);
+	if (first)
+	    firstChanged = true;
     }
-    if (telEvent && local.m_rtpMedia.m_telEvent != telEvent) {
+    // Update telephone event payload id
+    if (local.m_rtpMedia.m_telEvent != recv.m_rtpMedia.m_telEvent) {
 	Debug(this,DebugAll,"Content '%s' changing tel event from %d to %d [%p]",
-	    local.toString().c_str(),local.m_rtpMedia.m_telEvent,telEvent,this);
-	local.m_rtpMedia.m_telEvent = telEvent;
+	    local.toString().c_str(),local.m_rtpMedia.m_telEvent,
+	    recv.m_rtpMedia.m_telEvent,this);
+	local.m_rtpMedia.m_telEvent = recv.m_rtpMedia.m_telEvent;
+	telEvChanged = true;
     }
-    return 0 != local.m_rtpMedia.skipNull();
+    if (local.m_rtpMedia.skipNull())
+	return true;
+    Debug(this,DebugInfo,"No common media for content=%s [%p]",
+	local.toString().c_str(),this);
+    return false;
 }
 
 // Find a session content in a list
@@ -2855,6 +3008,18 @@ bool YJGConnection::changeFTHostDir()
     return false;
 }
 
+// Build a RTP candidate
+JGRtpCandidate* YJGConnection::buildCandidate(bool nonP2P, bool rtp)
+{
+    if (nonP2P)
+	return new JGRtpCandidate(id() + "_candidate_" + String((int)Random::random()),
+	    rtp ? "1" : "2");
+    JGRtpCandidateP2P* p2p = new JGRtpCandidateP2P;
+    JGRtpCandidates::generateOldIceToken(p2p->m_username);
+    JGRtpCandidates::generateOldIceToken(p2p->m_password);
+    return p2p;
+}
+
 // Process chan.notify messages
 // Handle SOCKS status changes for file transfer
 bool YJGConnection::processChanNotify(Message& msg)
@@ -3027,6 +3192,17 @@ void YJGConnection::overrideJingleVersion(const NamedList& list, bool caps)
     }
 }
 
+// Override session flags
+void YJGConnection::overrideJingleFlags(const NamedList& list, const char* param)
+{
+    String* str = list.getParam(param);
+    if (!str)
+	return;
+    m_sessFlags = JGEngine::decodeFlags(*str,JGSession::s_flagName);
+    Debug(this,DebugAll,"Session flags set to %d from %s=%s [%p]",
+	m_sessFlags,param,str->c_str(),this);
+}
+
 // Copy chan/session params to a destination list
 void YJGConnection::copySessionParams(NamedList& list, bool redirect)
 {
@@ -3047,6 +3223,9 @@ void YJGConnection::copySessionParams(NamedList& list, bool redirect)
     jingleAddParam(list,"line",m_line,copy,false);
     jingleAddParam(list,"ojingle_version",
 	JGSession::lookupVersion(m_sessVersion,""),copy,false);
+    String flags;
+    JGEngine::encodeFlags(flags,m_sessFlags,JGSession::s_flagName);
+    jingleAddParam(list,"ojingle_flags",flags,copy,false);
     jingleAddParam(list,"callerprompt",m_callerPrompt,copy,false);
     jingleAddParam(list,"subject",m_subject,copy,false);
     jingleAddParam(list,"secure",String::boolText(m_secure),copy);
@@ -3194,6 +3373,31 @@ bool YJGConnection::checkMedia(const JGEvent& event, JGSessionContent& c)
 	    remoteCaps.c_str(),this);
     }
     return false;
+}
+
+// Clear and reset audio related data
+void YJGConnection::resetEp(const String& what, bool releaseContent)
+{
+    Debug(this,DebugAll,"Resetting endpoint '%s' [%p]",what.c_str(),this);
+    clearEndpoint(what);
+    Lock lock(m_mutex);
+    if (!what || what == "audio") {
+	m_rtpId.clear();
+	m_rtpStarted = false;
+	if (releaseContent)
+	    TelEngine::destruct(m_audioContent);
+    }
+}
+
+// Hangup and drop the call if failed to setup encryption
+void YJGConnection::dropNoCrypto()
+{
+    const char* reason = "crypto-required";
+    hangup(reason,"Failed to setup encryption");
+    Message* m = new Message("call.drop");
+    m->addParam("id",id());
+    m->addParam("reason",reason);
+    Engine::enqueue(m);
 }
 
 
@@ -3437,8 +3641,11 @@ void YJGDriver::initialize()
 
 	(new YJGEngineWorker)->startup();
     }
-    else
+    else {
 	setDomains(sect->getValue("domains"));
+	loadLimits();
+    }
+    s_jingle->initialize(*sect);
 
     if (s_serverMode) {
 	s_requestSubscribe = sect->getBoolValue("request_subscribe",true);

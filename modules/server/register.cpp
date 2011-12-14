@@ -420,6 +420,9 @@ bool AAAHandler::received(Message& msg)
     String account(m_account);
     msg.replaceParams(query,true);
     msg.replaceParams(account,true);
+    if (query.null() || account.null())
+	return false;
+
     switch (m_type)
     {
 	case Regist:
@@ -436,6 +439,8 @@ bool AAAHandler::received(Message& msg)
 	break;
 	case Auth:
 	{
+	    if (!msg.getBoolValue("auth_register",true))
+		return false;
 	    Message m("database");
 	    prepareQuery(m,account,query,true);
 	    if (Engine::dispatch(m))
@@ -550,6 +555,8 @@ bool CDRHandler::loadQuery()
 
 bool CDRHandler::received(Message& msg)
 {
+    if (!msg.getBoolValue("cdrwrite_register",true))
+	return false;
     if (m_account.null())
 	return false;
     // Don't update CDR if told so
@@ -570,6 +577,9 @@ bool CDRHandler::received(Message& msg)
     String account(m_account);
     msg.replaceParams(query,true);
     msg.replaceParams(account,true);
+    if (query.null() || account.null())
+	return false;
+
     // failure while accounting is critical
     Message m("database");
     prepareQuery(m,account,query,true);

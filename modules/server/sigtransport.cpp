@@ -30,8 +30,8 @@
 
 #define MAX_BUF_SIZE  48500
 
-#define CONN_RETRY_MIN  100000
-#define CONN_RETRY_MAX 5000000
+#define CONN_RETRY_MIN   250000
+#define CONN_RETRY_MAX 60000000
 
 using namespace TelEngine;
 namespace { // anonymous
@@ -117,16 +117,19 @@ class TReader : public TransportWorker, public Mutex
 public:
     inline TReader()
 	: Mutex(true,"TReader"),
-	  m_sending(true,"TReader::sending"), m_canSend(true),
+	  m_sending(true,"TReader::sending"), m_canSend(true), m_reconnect(false),
           m_tryAgain(0), m_interval(CONN_RETRY_MIN)
 	{ }
     virtual ~TReader();
     virtual void listen(int maxConn) = 0;
     virtual bool sendMSG(const DataBlock& header, const DataBlock& msg, int streamId = 0) = 0;
     virtual void setSocket(Socket* s) = 0;
+    void reconnect()
+	{ m_reconnect = true; }
     Mutex m_sending;
     bool m_canSend;
 protected:
+    bool m_reconnect;
     u_int64_t m_tryAgain;
     u_int32_t m_interval;
 };
@@ -162,6 +165,8 @@ public:
 	{ return m_listener != 0; }
     inline bool streamDefault() const
 	{ return m_type == Tcp || m_type == Unix; }
+    inline bool supportEvents()
+	{ return m_type == Sctp && m_supportEvents; }
     void setStatus(int status);
     inline int status() const
 	{ return m_state; }
@@ -172,9 +177,10 @@ public:
 	{ return m_type == Sctp || m_type == Tcp; }
     virtual bool control(const NamedList &param);
     virtual bool connected(int id) const
-	{ return true;}
+	{ return m_state == Up;}
     virtual void attached(bool ual)
 	{ }
+    virtual void reconnect(bool force);
     bool connectSocket();
     u_int32_t getMsgLen(unsigned char* buf);
     bool addAddress(const NamedList &param, Socket* socket);
@@ -189,6 +195,7 @@ private:
     ListenerThread* m_listener;
     const NamedList m_config;
     bool m_endpoint;
+    bool m_supportEvents;
 };
 
 class StreamReader : public TReader
@@ -205,6 +212,7 @@ public:
     virtual void listen(int maxConn)
 	{ }
     virtual bool sendBuffer(int streamId = 0);
+    void connectionDown();
 private:
     Transport* m_transport;
     Socket* m_socket;
@@ -223,13 +231,14 @@ public:
     ~MessageReader();
     virtual bool readData();
     virtual bool connectSocket()
-	{ return m_transport->connectSocket(); }
+	{ return bindSocket(); }
     virtual bool needConnect()
 	{ return m_transport && m_transport->status() == Transport::Down && !m_transport->listen(); }
     virtual bool sendMSG(const DataBlock& header, const DataBlock& msg, int streamId = 0);
     virtual void setSocket(Socket* s);
     virtual void listen(int maxConn)
 	{ m_socket->listen(maxConn); }
+    bool bindSocket();
 private:
     Socket* m_socket;
     Transport* m_transport;
@@ -324,7 +333,7 @@ bool ListenerThread::init(const NamedList& param)
 	    m.userData(s);
 	    TelEngine::destruct(s);
 	    if (!(Engine::dispatch(m) && soc)) {
-		DDebug("ListenerThread",DebugWarn,"Could not obtain SctpSocket");
+		Debug("ListenerThread",DebugConf,"Could not obtain SctpSocket");
 		return false;
 	    }
 	    m_socket = soc;
@@ -518,7 +527,7 @@ SignallingComponent* Transport::create(const String& type, const NamedList& name
 }
 
 Transport::Transport(const NamedList &param)
-    : m_reader(0), m_state(Down), m_listener(0), m_config(param), m_endpoint(true)
+    : m_reader(0), m_state(Down), m_listener(0), m_config(param), m_endpoint(true), m_supportEvents(true)
 {
     setName("Transport");
     Debug(this,DebugAll,"Transport created (%p)",this);
@@ -536,17 +545,32 @@ Transport::~Transport()
 
 bool Transport::control(const NamedList &param)
 {
-    String oper = param.getValue("operation","init");
-    if (oper == "init")
+    String oper = param.getValue(YSTRING("operation"),YSTRING("init"));
+    if (oper == YSTRING("init"))
 	return initialize(&param);
-    else if (oper == "add_addr") {
+    else if (oper == YSTRING("add_addr")) {
 	if (!m_listener) {
 	    Debug(this,DebugWarn,"Unable to listen on another address, listener is missing");
 	    return false;
 	}
 	return m_listener->addAddress(param);
+    } else if (oper == YSTRING("reconnect")) {
+	reconnect(true);
+	return true;
     }
     return false;
+}
+
+void Transport::reconnect(bool force)
+{
+    if (!m_reader) {
+	Debug(this,DebugWarn,"Request to reconnect but the transport is not initialized!!");
+	return;
+    }
+    if (m_state == Up && !force)
+	return;
+    Debug(this,DebugInfo,"Transport reconnect requested");
+    m_reader->reconnect();
 }
 
 bool Transport::initialize(const NamedList* params)
@@ -582,16 +606,6 @@ bool Transport::initialize(const NamedList* params)
 	addr.port(port);
 	m_reader = new MessageReader(this,0,addr);
 	bindSocket();
-	if (m_type == Sctp) {
-	    // Send a dummy MGMT NTFY message to create the connection
-	    static const unsigned char dummy[8] =
-		{ 1, 0, 0, 1, 0, 0, 0, 8 };
-	    DataBlock hdr((void*)dummy,8,false);
-	    if (m_reader->sendMSG(hdr,DataBlock::empty(),1))
-		m_reader->listen(1);
-	    hdr.clear(false);
-	    setStatus(Up);
-	}
     }
     m_reader->start();
     return true;
@@ -615,7 +629,7 @@ bool Transport::bindSocket()
 	    m.userData(s);
 	    TelEngine::destruct(s);
 	    if (!(Engine::dispatch(m) && soc)) {
-		DDebug("ListenerThread",DebugWarn,"Could not obtain SctpSocket");
+		Debug(this,DebugConf,"Could not obtain SctpSocket");
 		return false;
 	    }
 	    socket = soc;
@@ -625,6 +639,8 @@ bool Transport::bindSocket()
 		Debug(this,DebugInfo,"Failed to set sctp streams number");
 	    if (!sctp->subscribeEvents())
 		Debug(this,DebugWarn,"Unable to subscribe to Sctp events");
+	    if (!sctp->setParams(m_config))
+		Debug(this,DebugWarn,"Failed to set SCTP params!");
 	    int ppid = sigtran() ? sigtran()->payload() : 0;
 	    ppid = m_config.getIntValue("payload",ppid);
 	    if (ppid > 0)
@@ -642,12 +658,16 @@ bool Transport::bindSocket()
     if (!socket)
 	return false;
     if (!socket->valid()) {
-	Debug(this,DebugWarn,"Unable to create listener socket: %s",
+	Debug(this,DebugWarn,"Unable to create message socket: %s",
 	    strerror(socket->error()));
+	socket->terminate();
+	delete socket;
 	return false;
     }
     if (!socket->setBlocking(false)) {
-	Debug(this,DebugWarn,"Unable to set listener to nonblocking mode");
+	Debug(this,DebugWarn,"Unable to set message socket to nonblocking mode");
+	socket->terminate();
+	delete socket;
 	return false;
     }
     SocketAddr addr(AF_INET);
@@ -657,16 +677,32 @@ bool Transport::bindSocket()
     addr.host(address);
     addr.port(port);
     if (!socket->bind(addr)) {
-	Debug(DebugNote,"Unable to bind to %s:%u: %d: %s",
+	Debug(DebugMild,"Unable to bind to %s:%u: %d: %s",
 	    addr.host().c_str(),addr.port(),errno,strerror(errno));
+	socket->terminate();
+	delete socket;
 	return false;
     } else
-	Debug(this,DebugAll,"Socket bound to %s:%u",addr.host().c_str(),addr.port());
-    if (multi && !addAddress(m_config,socket))
+	DDebug(this,DebugAll,"Socket bound to %s:%u",addr.host().c_str(),addr.port());
+    if (multi && !addAddress(m_config,socket)) {
+	socket->terminate();
+	delete socket;
 	return false;
+    }
     m_reader->setSocket(socket);
-    if (m_type == Transport::Udp)
-	setStatus(Up);
+    int linger = m_config.getIntValue("linger",0);
+    socket->setLinger(linger);
+    setStatus(Up);
+    if (m_type == Sctp) {
+	// Send a dummy MGMT NTFY message to create the connection
+	static const unsigned char dummy[8] =
+		{ 1, 0, 0, 1, 0, 0, 0, 8 };
+	DataBlock hdr((void*)dummy,8,false);
+	setStatus(Initiating);
+	if (m_reader->sendMSG(hdr,DataBlock::empty(),1))
+	    m_reader->listen(1);
+	hdr.clear(false);
+    }
     return true;
 }
 
@@ -714,15 +750,19 @@ bool Transport::connectSocket()
 	    m.userData(s);
 	    TelEngine::destruct(s);
 	    if (!(Engine::dispatch(m) && sock)) {
-		DDebug(this,DebugNote,"Could not obtain SctpSocket");
+		Debug(this,DebugConf,"Could not obtain SctpSocket");
 		return false;
 	    }
 	    sock->create(AF_INET,m_streamer ? SOCK_STREAM : SOCK_SEQPACKET,IPPROTO_SCTP);
 	    SctpSocket* socket = static_cast<SctpSocket*>(sock);
 	    if (!socket->setStreams(2,2))
 		Debug(this,DebugInfo,"Failed to set sctp streams number");
-	    if (!socket->subscribeEvents())
+	    if (!socket->subscribeEvents()) {
 		Debug(this,DebugWarn,"Unable to subscribe to Sctp events");
+		m_supportEvents = false;
+	    }
+	    if (!socket->setParams(m_config))
+		Debug(this,DebugWarn,"Failed to set SCTP params!");
 	    int ppid = sigtran() ? sigtran()->payload() : 0;
 	    ppid = m_config.getIntValue("payload",ppid);
 	    if (ppid > 0)
@@ -805,6 +845,7 @@ bool Transport::connectSocket()
 	} else
 	     Debug(this,DebugNote,"Socket conected to %d addresses",o.count());
     }
+    sock->setBlocking(false);
     m_reader->setSocket(sock);
     setStatus(Up);
     return true;
@@ -864,8 +905,12 @@ bool Transport::addSocket(Socket* socket,SocketAddr& adress)
 	    SctpSocket* soc = static_cast<SctpSocket*>(sock);
 	    if (!soc->setStreams(2,2))
 		DDebug(this,DebugInfo,"Sctp set Streams failed");
-	    if (!soc->subscribeEvents())
+	    if (!soc->subscribeEvents()) {
 		DDebug(this,DebugInfo,"Sctp subscribe events failed");
+		m_supportEvents = false;
+	    }
+	    if (!soc->setParams(m_config))
+		Debug(this,DebugWarn,"Failed to set SCTP params!");
 	    int ppid = sigtran() ? sigtran()->payload() : 0;
 	    ppid = m_config.getIntValue("payload",ppid);
 	    if (ppid > 0)
@@ -916,6 +961,7 @@ void StreamReader::setSocket(Socket* s)
 {
     if (!s || s == m_socket)
 	return;
+    m_reconnect = false;
     Socket* temp = m_socket;
     m_socket = s;
     if (temp) {
@@ -949,8 +995,13 @@ bool StreamReader::sendBuffer(int streamId)
     if (m_sendBuffer.null())
 	return true;
     bool sendOk = false, error = false;
-    if (!m_socket->select(0,&sendOk,&error,Thread::idleUsec()) || error) {
-	DDebug(m_transport,DebugAll,"Error detected. %s",strerror(errno));
+    if (!m_socket->select(0,&sendOk,&error,Thread::idleUsec())) {
+	DDebug(m_transport,DebugAll,"Select error detected. %s",strerror(errno));
+	return false;
+    }
+    if (error) {
+	if (m_socket->updateError() && !m_socket->canRetry())
+	    connectionDown();
 	return false;
     }
     if (!sendOk)
@@ -962,13 +1013,21 @@ bool StreamReader::sendBuffer(int streamId)
 	    Debug(m_transport,DebugGoOn,"Sctp conversion failed");
 	    return false;
 	}
+	if (m_transport->status() == Transport::Up)
+	    if (!s->valid()) {
+		connectionDown();
+		return false;
+	    }
 	int flags = 0;
 	len = s->sendMsg(m_sendBuffer.data(),m_sendBuffer.length(),streamId,flags);
     }
     else
 	len = m_socket->send(m_sendBuffer.data(),m_sendBuffer.length());
     if (len <= 0) {
-	DDebug(m_transport,DebugAll,"Send error detected. %s",strerror(errno));
+	if (!m_socket->canRetry()) {
+	    Debug(m_transport,DebugMild,"Send error detected. %s",strerror(errno));
+	    connectionDown();
+	}
 	return false;
     }
     m_sendBuffer.cut(-len);
@@ -1000,13 +1059,13 @@ bool StreamReader::readData()
     if (!m_socket)
 	return false;
     m_sending.lock();
+    if (m_reconnect) {
+	connectionDown();
+	m_sending.unlock();
+	return false;
+    }
     sendBuffer();
     m_sending.unlock();
-    bool readOk = false, error = false;
-    if (!m_socket->select(&readOk,0,&error,Thread::idleUsec()))
-	return false;
-    if (!readOk || error || !running())
-	return false;
     int stream = 0, len = 0;
     SocketAddr addr;
     unsigned char buf[MAX_BUF_SIZE];
@@ -1025,16 +1084,7 @@ bool StreamReader::readData()
 		    m_transport->setStatus(Transport::Up);
 		    return true;
 		}
-		DDebug(m_transport,DebugWarn,"Connection down [%p] %d",m_socket, flags);
-		m_transport->setStatus(Transport::Down);
-		while (!m_sending.lock(Thread::idleUsec()))
-		    Thread::yield();
-		m_canSend = false;
-		m_sending.unlock();
-		m_socket->terminate();
-		if (m_transport->listen())
-		    stop();
-		delete m_socket;
+		connectionDown();
 		return false;
 	    }
 	}
@@ -1042,8 +1092,15 @@ bool StreamReader::readData()
 	    SocketAddr addr;
 	    len = m_socket->recv((void*)buf,m_headerLen);
 	}
-	if (len <= 0)
+	if (len == 0) {
+	    connectionDown();
 	    return false;
+	}
+	if (len < 0) {
+	    if (!m_socket->canRetry())
+		connectionDown();
+	    return false;
+	}
 	m_headerLen -= len;
 	m_headerBuffer.append(buf,len);
 	if (m_headerLen > 0)
@@ -1080,17 +1137,25 @@ bool StreamReader::readData()
 		return false;
 	    }
 	    len = s->recvMsg((void*)buf1,m_totalPacketLen,addr,stream,flags);
-	    if (flags) {
-		DDebug(m_transport,DebugWarn,"Receive error [%p]",m_socket);
-		m_transport->notifyLayer(SignallingInterface::HardwareError);
+	    if (flags && flags != 2) {
+		connectionDown();
+		return false;
 	    }
 	}
 	else {
 	    SocketAddr addr;
 	    len = m_socket->recv((void*)buf1,m_totalPacketLen);
 	}
-	if (len <= 0)
+	if (len == 0) {
+	    if (!m_transport->supportEvents())
+		connectionDown();
 	    return false;
+	}
+	if (len < 0) {
+	    if (!m_socket->canRetry())
+		connectionDown();
+	    return false;
+	}
 	m_transport->setStatus(Transport::Up);
 	m_totalPacketLen -= len;
 	m_readBuffer.append(buf1,len);
@@ -1107,6 +1172,26 @@ bool StreamReader::readData()
     }
     return false;
 }
+
+void StreamReader::connectionDown() {
+    Debug(m_transport,DebugMild,"Connection down [%p]",m_socket);
+    m_transport->setStatus(Transport::Down);
+    while (!m_sending.lock(Thread::idleUsec()))
+	Thread::yield();
+    m_canSend = false;
+    m_sendBuffer.clear();
+    if (!m_socket) {
+	m_sending.unlock();
+	return;
+    }
+    m_socket->terminate();
+    if (m_transport->listen())
+	stop();
+    delete m_socket;
+    m_socket = 0;
+    m_sending.unlock();
+}
+
 
 /**
  * class MessageReader
@@ -1132,11 +1217,33 @@ void MessageReader::setSocket(Socket* s)
 {
     if (!s || s == m_socket)
 	return;
+    m_reconnect = false;
     if (m_socket) {
 	m_socket->terminate();
 	delete m_socket;
     }
     m_socket = s;
+}
+
+bool MessageReader::bindSocket()
+{
+    Time t;
+    if (t < m_tryAgain) {
+	Thread::yield(true);
+	return false;
+    }
+    m_tryAgain = t + m_interval;
+    Lock mylock(m_sending);
+    if (m_transport->bindSocket()) {
+	m_interval = CONN_RETRY_MIN;
+	return true;
+    }
+    m_tryAgain = Time::now() + m_interval;
+    // exponential backoff
+    m_interval *= 2;
+    if (m_interval > CONN_RETRY_MAX)
+	m_interval = CONN_RETRY_MAX;
+    return false;
 }
 
 bool MessageReader::sendMSG(const DataBlock& header, const DataBlock& msg, int streamId)
@@ -1192,6 +1299,20 @@ bool MessageReader::sendMSG(const DataBlock& header, const DataBlock& msg, int s
 
 bool MessageReader::readData()
 {
+    Lock reconLock(m_sending);
+    // If m_socket is null We are already reconnecting
+    if (m_socket && m_reconnect) {
+	if (m_transport->status() != Transport::Up)
+	    return false; // We are already in reconnecting state
+	m_transport->setStatus(Transport::Initiating);
+	m_socket->terminate();
+	delete m_socket;
+	m_socket = 0;
+	return false;
+    }
+    reconLock.drop();
+    if (!m_socket && !bindSocket())
+	return false;
     bool readOk = false,error = false;
     if (!(running() && m_socket && m_socket->select(&readOk,0,&error,Thread::idleUsec())))
 	return false;
@@ -1226,12 +1347,14 @@ bool MessageReader::readData()
 		return true;
 	    }
 	    DDebug(m_transport,DebugNote,"Message error [%p] %d",m_socket,flags);
+	    if (m_transport->status() != Transport::Up)
+		return false;
+	    Lock lock(m_sending);
 	    m_transport->setStatus(Transport::Initiating);
-	    m_tryAgain = Time::now() + m_interval;
-	    // exponential backoff
-	    m_interval *= 2;
-	    if (m_interval > CONN_RETRY_MAX)
-		m_interval = CONN_RETRY_MAX;
+	    Debug(m_transport,DebugInfo,"Terminating socket [%p] Reason: connection down!",m_socket);
+	    m_socket->terminate();
+	    delete m_socket;
+	    m_socket = 0;
 	    return false;
 	}
     }

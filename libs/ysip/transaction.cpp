@@ -65,7 +65,7 @@ SIPTransaction::SIPTransaction(SIPMessage* message, SIPEngine* engine, bool outg
 	    }
 	}
     }
-    m_invite = (getMethod() == "INVITE");
+    m_invite = (getMethod() == YSTRING("INVITE"));
     m_state = Initial;
     m_engine->append(this);
 }
@@ -83,7 +83,7 @@ SIPTransaction::SIPTransaction(SIPTransaction& original, SIPMessage* answer)
 	&original,answer,this);
 
     SIPMessage* msg = new SIPMessage(*original.m_firstMessage);
-    MimeAuthLine* auth = answer->buildAuth(*original.m_firstMessage);
+    MimeAuthLine* auth = answer->buildAuth(*original.m_firstMessage,m_engine);
     m_firstMessage->setAutoAuth();
     msg->complete(m_engine);
     msg->addHeader(auth);
@@ -193,7 +193,7 @@ void SIPTransaction::setDialogTag(const char* tag)
 {
     if (null(tag)) {
 	if (m_tag.null())
-	    m_tag = (int)::random();
+	    m_tag = (int)Random::random();
     }
     else
 	m_tag = tag;
@@ -266,8 +266,8 @@ SIPEvent* SIPTransaction::getEvent(bool pendingOnly)
     int timeout = -1;
     if (m_timeout && (Time::now() >= m_timeout)) {
 	timeout = --m_timeouts;
-	m_timeout = (m_timeouts) ? Time::now() + m_delay : 0;
 	m_delay *= 2; // exponential back-off
+	m_timeout = (m_timeouts) ? Time::now() + m_delay : 0;
 	DDebug(getEngine(),DebugAll,"SIPTransaction fired timer #%d [%p]",timeout,this);
     }
 
@@ -313,8 +313,13 @@ void SIPTransaction::setResponse(SIPMessage* message)
     if (message && (message->code >= 200)) {
 	if (isInvite()) {
 	    // we need to actively retransmit this message
-	    if (changeState(Retrans))
-		setTimeout(m_engine->getTimer('G'),6);
+	    // RFC3261 17.2.1: non 2xx are not retransmitted on reliable transports
+	    if (changeState(Retrans)) {
+		bool reliable = message->getParty() && message->getParty()->isReliable();
+		bool retrans = !reliable || message->code < 300;
+		setTimeout(m_engine->getTimer(retrans ? 'G' : 'H',reliable),
+		    retrans ? m_engine->getRspTransCount() : 1);
+	    }
 	}
 	else {
 	    // just wait and reply to retransmits
@@ -577,8 +582,13 @@ SIPEvent* SIPTransaction::getClientEvent(int state, int timeout)
     switch (state) {
 	case Initial:
 	    e = new SIPEvent(m_firstMessage,this);
-	    if (changeState(Trying))
-		setTimeout(m_engine->getTimer(isInvite() ? 'A' : 'E'),5);
+	    if (changeState(Trying)) {
+		bool reliable = e->getParty() && e->getParty()->isReliable();
+		if (!reliable)
+		    setTimeout(m_engine->getTimer(isInvite() ? 'A' : 'E'),m_engine->getReqTransCount());
+		else
+		    setTimeout(m_engine->getTimer(isInvite() ? 'B' : 'F',true),1);
+	    }
 	    break;
 	case Trying:
 	    if (timeout < 0)

@@ -17,6 +17,8 @@ $next = 0;
 $users = array();
 // list of active channels (dialog) subscriptions
 $chans = array();
+// list of active presence subscriptions
+$pres = array();
 
 // Abstract subscription object
 class Subscription {
@@ -31,6 +33,7 @@ class Subscription {
     var $to;
     var $callid;
     var $contact;
+    var $connid;
     var $state;
     var $body = "";
     var $expire = 0;
@@ -55,6 +58,7 @@ class Subscription {
 	    $this->to .= ';tag=' . $ev->GetValue("xsip_dlgtag");
 	$this->callid = $ev->params["sip_callid"];
 	$this->contact = $ev->params["sip_contact"];
+	$this->connid = $ev->params["connection_id"];
 	$exp = $ev->params["sip_expires"];
 	if ($exp == "0") {
 	    // this is an unsubscribe
@@ -95,6 +99,8 @@ class Subscription {
 	$m->params["uri"] = $this->contact;
 	$m->params["host"] = $this->host;
 	$m->params["port"] = $this->port;
+	if (strlen($this->connid) > 0)
+	    $m->params["connection_id"] = $this->connid;
 	$m->params["sip_Call-ID"] = $this->callid;
 	$m->params["sip_From"] = $this->to;
 	$m->params["sip_To"] = $this->from;
@@ -138,7 +144,6 @@ class Subscription {
 class MailSub extends Subscription {
 
     function MailSub($ev) {
-	global $users;
 	parent::Subscription($ev,"message-summary","application/simple-message-summary");
     }
 
@@ -164,7 +169,6 @@ class DialogSub extends Subscription {
     var $version;
 
     function DialogSub($ev) {
-	global $chans;
 	parent::Subscription($ev,"dialog","application/dialog-info+xml");
 	$this->version = 0;
     }
@@ -237,6 +241,27 @@ class DialogSub extends Subscription {
     }
 }
 
+// Presence subscription
+class PresenceSub extends Subscription {
+
+    function PresenceSub($ev) {
+	parent::Subscription($ev,"presence","application/pidf+xml");
+	$this->body = '<?xml version="1.0" encoding="UTF-8"?><presence xmlns="urn:ietf:params:xml:ns:pidf"></presence>';
+    }
+
+    // Update presence of users
+    function Update($ev,$id)
+    {
+	$body = $ev->GetValue("xsip_body");
+	if ($body != "") {
+	    Yate::Debug("Presence: for " . $this->match);
+	    $this->body = $body;
+	    $this->pending = true;
+	    $this->Flush();
+	}
+    }
+}
+
 // Update all subscriptions in a $list that match a given $key
 function updateAll(&$list,$key,$ev,$id = false)
 {
@@ -286,6 +311,7 @@ function onSubscribe($ev)
 {
     global $users;
     global $chans;
+    global $pres;
     $event = $ev->GetValue("sip_event");
     $accept = $ev->GetValue("sip_accept");
     if (($event == "message-summary") && ($accept == "application/simple-message-summary" || $accept == "")) {
@@ -297,6 +323,11 @@ function onSubscribe($ev)
 	$s = new DialogSub($ev);
 	$s->AddTo($chans);
 	Yate::Debug("New dialog subscription for " . $s->match);
+    }
+    else if (($event == "presence") && ($accept == "application/pidf+xml" || $accept == "")) {
+	$s = new PresenceSub($ev);
+	$s->AddTo($pres);
+	Yate::Debug("New presence subscription for " . $s->match);
     }
     else
 	return false;
@@ -310,12 +341,19 @@ function onSubscribe($ev)
     return true;
 }
 
+// SIP PUBLISH handler
+function onPublish($ev)
+{
+    global $pres;
+    updateAll($pres,$ev->GetValue("caller"),$ev);
+    return true;
+}
+
 // User status (mailbox) update handler
 function onUserUpdate($ev)
 {
     global $users;
     updateAll($users,$ev->GetValue("user"),$ev);
-    return false;
 }
 
 // Channel status (dialog) handler, not currently used
@@ -323,7 +361,6 @@ function onChanUpdate($ev)
 {
     global $chans;
     updateAll($chans,$ev->GetValue("id"),$ev);
-    return false;
 }
 
 // CDR handler for channel status update
@@ -331,7 +368,6 @@ function onCdr($ev)
 {
     global $chans;
     updateAll($chans,$ev->GetValue("external"),$ev,$ev->GetValue("chan"));
-    return false;
 }
 
 // Timer message handler, expires and flushes subscriptions
@@ -339,6 +375,7 @@ function onTimer($t)
 {
     global $users;
     global $chans;
+    global $pres;
     global $next;
     if ($t < $next)
 	return;
@@ -347,9 +384,11 @@ function onTimer($t)
     // Yate::Debug("Expiring aged subscriptions at $t");
     expireAll($users);
     expireAll($chans);
+    expireAll($pres);
     // Yate::Debug("Flushing pending subscriptions at $t");
     flushAll($users);
     flushAll($chans);
+    flushAll($pres);
 }
 
 // Command message handler
@@ -357,10 +396,12 @@ function onCommand($l,&$retval)
 {
     global $users;
     global $chans;
+    global $pres;
     if ($l == "sippbx list") {
 	$retval .= "Subscriptions:\r\n";
 	dumpAll($users,$retval);
 	dumpAll($chans,$retval);
+	dumpAll($pres,$retval);
 	return true;
     }
     return false;
@@ -369,11 +410,13 @@ function onCommand($l,&$retval)
 /* Always the first action to do */
 Yate::Init();
 
+Yate::Output(true);
 Yate::Debug(true);
 
 Yate::SetLocal("restart",true);
 
 Yate::Install("sip.subscribe");
+Yate::Install("sip.publish");
 Yate::Install("user.update");
 Yate::Install("chan.update");
 Yate::Install("call.cdr");
@@ -397,7 +440,9 @@ for (;;) {
 	case "incoming":
 	    switch ($ev->name) {
 		case "engine.timer":
+		    $ev->Acknowledge();
 		    onTimer($ev->GetValue("time"));
+		    $ev = false;
 		    break;
 		case "engine.command":
 		    $ev->handled = onCommand($ev->GetValue("line"),$ev->retval);
@@ -405,17 +450,27 @@ for (;;) {
 		case "sip.subscribe":
 		    $ev->handled = onSubscribe($ev);
 		    break;
+		case "sip.publish":
+		    $ev->handled = onPublish($ev);
+		    break;
 		case "user.update":
-		    $ev->handled = onUserUpdate($ev);
+		    $ev->Acknowledge();
+		    onUserUpdate($ev);
+		    $ev = false;
 		    break;
 		case "chan.update":
-		    $ev->handled = onChanUpdate($ev);
+		    $ev->Acknowledge();
+		    onChanUpdate($ev);
+		    $ev = false;
 		    break;
 		case "call.cdr":
-		    $ev->handled = onCdr($ev);
+		    $ev->Acknowledge();
+		    onCdr($ev);
+		    $ev = false;
 		    break;
 	    }
-	    $ev->Acknowledge();
+	    if ($ev)
+		$ev->Acknowledge();
 	    break;
 	case "answer":
 	    // Yate::Debug("PHP Answered: " . $ev->name . " id: " . $ev->id);

@@ -51,8 +51,9 @@ public:
 protected:
     void clear(bool softly);
     String* getNextDest();
-    bool forkSlave(const char* dest);
+    bool forkSlave(String* dest);
     bool callContinue();
+    RefPointer<CallEndpoint> m_discPeer;
     ObjList m_slaves;
     String m_ringing;
     Regexp m_failures;
@@ -67,6 +68,7 @@ protected:
     bool m_timerDrop;
     bool m_execNext;
     bool m_chanMsgs;
+    bool m_failuresRev;
     String m_reason;
     String m_media;
 };
@@ -145,7 +147,7 @@ ForkMaster::ForkMaster(ObjList* targets)
     : m_index(0), m_answered(false), m_rtpForward(false), m_rtpStrict(false),
       m_fake(false), m_targets(targets), m_exec(0),
       m_timer(0), m_timerDrop(false), m_execNext(false), m_chanMsgs(false),
-      m_reason("hangup")
+      m_failuresRev(false), m_reason("hangup")
 {
     String tmp(MOD_PREFIX "/");
     tmp << ++s_current;
@@ -162,6 +164,19 @@ ForkMaster::~ForkMaster()
     s_calls.remove(this,false);
     CallEndpoint::commonMutex().unlock();
     clear(false);
+    if (m_discPeer && !m_answered) {
+	RefPointer<CallEndpoint> call = m_discPeer->getPeer();
+	if (call) {
+	    Message* r = new Message("chan.replaced",0,true);
+	    r->addParam("id",id());
+	    r->addParam("newid",call->id());
+	    r->addParam("peerid",m_discPeer->id());
+	    r->userData(this);
+	    Engine::enqueue(r);
+	    call = 0;
+	}
+    }
+    m_discPeer = 0;
     if (m_chanMsgs) {
 	Message* msg = new Message("chan.hangup");
 	msg->addParam("id",id());
@@ -173,7 +188,7 @@ ForkMaster::~ForkMaster()
 void ForkMaster::disconnected(bool final, const char* reason)
 {
     CallEndpoint::disconnected(final,reason);
-    if (m_chanMsgs && !(final || m_answered)) {
+    if (m_chanMsgs && !(final || m_answered || m_discPeer)) {
 	Message* msg = new Message("chan.disconnected");
 	msg->addParam("id",id());
 	if (m_exec)
@@ -191,7 +206,7 @@ String* ForkMaster::getNextDest()
     return ret;
 }
 
-bool ForkMaster::forkSlave(const char* dest)
+bool ForkMaster::forkSlave(String* dest)
 {
     if (null(dest))
 	return false;
@@ -199,9 +214,12 @@ bool ForkMaster::forkSlave(const char* dest)
     m_exec->clearParam("error");
     m_exec->clearParam("reason");
     Message msgCopy(*m_exec);
-    msgCopy.setParam("callto",dest);
+    msgCopy.setParam("callto",*dest);
     msgCopy.setParam("rtp_forward",String::boolText(m_rtpForward));
     msgCopy.setParam("cdrtrack",String::boolText(false));
+    NamedList* params = YOBJECT(NamedList,dest);
+    if (params)
+	msgCopy.copyParams(*params);
     if (m_execNext) {
 	RefPointer<CallEndpoint> peer = getPeer();
 	if (!peer) {
@@ -209,7 +227,8 @@ bool ForkMaster::forkSlave(const char* dest)
 	    return false;
 	}
 	Debug(&__plugin,DebugCall,"Call '%s' directly to target '%s'",
-	    peer->id().c_str(),dest);
+	    peer->id().c_str(),dest->c_str());
+	m_discPeer = peer;
 	msgCopy.userData(peer);
 	msgCopy.setParam("id",peer->id());
 	msgCopy.clearParam("cdrtrack");
@@ -242,7 +261,7 @@ bool ForkMaster::forkSlave(const char* dest)
 		    level = DebugCall;
 		}
 		Debug(&__plugin,level,"Call '%s' did not get RTP forward from '%s' target '%s'",
-		    getPeerId().c_str(),slave->getPeerId().c_str(),dest);
+		    getPeerId().c_str(),slave->getPeerId().c_str(),dest->c_str());
 	    }
 	}
 	m_exec->copyParams(msgCopy,"error,reason,rtp_forward");
@@ -253,7 +272,7 @@ bool ForkMaster::forkSlave(const char* dest)
     if (ok) {
 	ForkSlave::Type type = static_cast<ForkSlave::Type>(msgCopy.getIntValue("fork.calltype",s_calltypes,ForkSlave::Regular));
 	Debug(&__plugin,DebugCall,"Call '%s' calling on %s '%s' target '%s'",
-	    getPeerId().c_str(),lookup(type,s_calltypes),tmp.c_str(),dest);
+	    getPeerId().c_str(),lookup(type,s_calltypes),tmp.c_str(),dest->c_str());
 	slave->setType(type);
 	m_slaves.append(slave);
 	if (autoring) {
@@ -287,6 +306,10 @@ bool ForkMaster::startCalling(Message& msg)
     }
     // stoperror is OBSOLETE
     m_failures = msg.getValue("fork.stop",msg.getValue("stoperror"));
+    if (m_failures.endsWith("^")) {
+	m_failuresRev = true;
+	m_failures = m_failures.substr(0,m_failures.length()-1);
+    }
     m_exec->clearParam("stoperror");
     m_exec->clearParam("fork.stop");
     m_exec->clearParam("peerid");
@@ -356,7 +379,7 @@ bool ForkMaster::callContinue()
 		break;
 	    continue;
 	}
-	if (forkSlave(*dest))
+	if (forkSlave(dest))
 	    ++forks;
 	dest->destruct();
     }
@@ -392,7 +415,7 @@ void ForkMaster::lostSlave(ForkSlave* slave, const char* reason)
     m_slaves.remove(slave,false);
     if (m_answered)
 	return;
-    if (reason && m_failures && m_failures.matches(reason)) {
+    if (reason && m_failures && (m_failures.matches(reason) != m_failuresRev)) {
 	Debug(&__plugin,DebugCall,"Call '%s' terminating early on reason '%s'",
 	    getPeerId().c_str(),reason);
     }
@@ -648,13 +671,19 @@ void ForkModule::initialize()
 			Debug(this,DebugWarn,"Refusing to fork message '%s'",item->name().c_str());
 			continue;
 		}
-		ForkRelay* r = new ForkRelay(item->name(),*item,
-		    cfg.getIntValue(s_prio,item->name(),prio));
-		Debug(this,DebugAll,"Will fork messages '%s' matching '%s'",
-		    item->name().c_str(),item->c_str());
+		int p = cfg.getIntValue(s_prio,item->name(),prio);
+		ForkRelay* r = new ForkRelay(item->name(),*item,p);
+		Debug(this,DebugInfo,"Will fork messages '%s' matching '%s' priority %d",
+		    item->name().c_str(),item->c_str(),p);
 		Engine::install(r);
 		m_hasRelays = true;
 	    }
+	}
+	else {
+	    int p = cfg.getIntValue(s_prio,"chan.dtmf",prio);
+	    Debug(this,DebugInfo,"Default fork for 'chan.dtmf' matching 'peerid' priority %d",p);
+	    Engine::install(new ForkRelay("chan.dtmf","peerid",p));
+	    m_hasRelays = true;
 	}
     }
 }
@@ -687,9 +716,41 @@ bool ForkModule::msgExecute(Message& msg)
     String dest(msg.getParam("callto"));
     if (!dest.startSkip(MOD_PREFIX))
 	return false;
-    ObjList* targets = dest.split(' ',false);
-    if (!targets)
+    ObjList* targets = 0;
+    if (dest)
+	targets = dest.split(' ',false);
+    else {
+	for (int n = 1; true; n++) {
+	    String prefix;
+	    prefix << "callto." << n;
+	    NamedString* ns = msg.getParam(prefix);
+	    if (!ns)
+		break;
+	    if (TelEngine::null(ns))
+		continue;
+	    // Set target parameters from enclosed list
+	    // Override/add new params from message sub-params
+	    NamedPointer* np = YOBJECT(NamedPointer,ns);
+	    NamedList* target = YOBJECT(NamedList,np);
+	    if (target) {
+		np->takeData();
+		target->assign(*ns);
+	    }
+	    else
+		target = new NamedList(*ns);
+	    target->copySubParams(msg,prefix + ".");
+	    if (!targets)
+		targets = new ObjList;
+	    targets->append(target);
+	    // Clear from initial message
+	    msg.clearParam(prefix,'.');
+	}
+    }
+    if (!(targets && targets->skipNull())) {
+	msg.setParam("error","failure");
+	TelEngine::destruct(targets);
 	return false;
+    }
     CallEndpoint::commonMutex().lock();
     ForkMaster* master = new ForkMaster(targets);
     bool ok = master->connect(ch,msg.getValue("reason")) && master->startCalling(msg);

@@ -4,6 +4,10 @@
 ; priority: int: Priority of the chan.rtp message handler
 ;priority=80
 
+; rfc2833: bool: Offer RFC2833 telephone-event by default
+; A numeric payload >= 96 can be provided
+;rfc2833=yes
+
 ; tzoffset: int: Timezone offset from GMT in seconds for sending Caller ID
 ; Positive to go East, negative to go West
 ; Examples: CET=3600, EST=-18000
@@ -23,11 +27,24 @@
 ; port: int: UDP port to bind, set to zero to use default MGCP CA port (2727)
 ;port=
 
+; Maximum received packet size, 1500 to 65528, default 1500
+;max_recv_packet=1500
+
+; buffer: int: Requested size of socket's receive buffer, 0 for system default
+; Minimum value is 4096
+;buffer=0
+
 ; request_ack: bool: Request an Acknowledge of the transactions
 ;request_ack=yes
 
 ; send_provisional: bool: Send 1xx provisional answers to the requests
 ;send_provisional=yes
+
+; retrans_interval: int: Message retransmission interval in msec
+;retrans_interval=250
+
+; retrans_count: int: Maximum number of retransmissions
+;retrans_count=3
 
 
 [endpoint]
@@ -120,6 +137,9 @@
 ;host=
 
 ; port: int: Remote port to send packets to
+; Zero uses the protocol default 2427
+; A negative value suppresses :port at end of ID
+; A value of -1 uses default 2427 but doesn't add at end of ID
 ;port=2427
 
 ; address: ipaddress: IP address of the gateway, if present will override
@@ -154,17 +174,24 @@
 ; E.g. 1-15.17-31 or 1-23 or 1.2.3-15.17.18-30.31
 ;voicechans=
 
-; chans: int: Number of PSTN circuits to create in span
+; chans: integer: Number of PSTN circuits to create in span
 ; Defaults to 1 or highest voicechan declared
 ;chans=1
 
-; offset: int: Offset of circuit code relative to start in span
+; offset: integer: Offset of circuit code relative to start in span
+; The parameter offset_NAME_OF_SPAN overrides this (useful for templates)
 ;offset=0
+
+; start: integer: Absolute start of circuits numbers, ignore group's start
+; Default is offset + group's current start
+; The parameter start_NAME_OF_SPAN overrides this (useful for templates)
+;start=
 
 ; increment: integer: How much will increment this span the circuit number in
 ;  the group it belongs to
 ; Defaults to 32 if chans is 30 or 31 (E1), 24 if chans is 23 (T1), number of
 ;  circuits in all other cases
+; The parameter increment_NAME_OF_SPAN overrides this (useful for templates)
 ;increment=
 
 ; clearconn: bool: Clear all connections of remote endpoints when initialized
@@ -177,8 +204,18 @@
 ; Normally the default bearer is not set so a B: line is added when needed
 ;bearer=
 
+; match_ntfy: bool: Strict match the X: id in NTFY against the local value
+; This can cause trouble with FXS/FXO persistent notifications
+;match_ntfy=yes for digital gateways, no for analogic
+
 ; req_fax: bool: Request Fax Tone detection from gateway
+; This requests notification for G/ft (Generic package, Fax Tone)
 ;req_fax=yes
+
+; req_t38: bool: Request Fax Relay detection from gateway
+; This requests notification for fxr/t38 (Fax Relay, T.38)
+; The default is taken from the req_fax setting
+;req_t38=
 
 ; req_evts: string: Requested Events in MGCP format, overrides default
 ; Default depends on endpoint configuration and fax setting
@@ -191,8 +228,13 @@
 ;  more - emit RQNT on connection and after each notification received
 ;req_dtmf=once
 
+; req_embed: boolean: Embed Request Notify in the CRCX message
+; This setting applies only to digital gateways, not FXS or FXO
+;req_embed=yes
+
 ; forward_rtp: bool: Support to forward RTP directly to protocols that support it
 ; The actual direct RTP forwarding is still negotiated in routing
+; The special value "always" (only for digital gateways) inhibits initial local RTP
 ;forward_rtp=yes for digital gateways, no for analogic
 
 ; forward_sdp: bool: Also include the raw SDP in the RTP forward offer
